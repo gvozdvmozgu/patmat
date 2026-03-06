@@ -522,16 +522,18 @@ impl<D: SpaceOperations> SpaceEngine<D> {
         self.simplify(&remainder)
     }
 
-    fn decomposition_for_type(&mut self, value_type: &D::Type) -> Decomposition<D::Type> {
-        if let Some(cached_decomposition) = self.caches.decompositions.get(value_type) {
-            return cached_decomposition.clone();
+    fn decomposition_for_type(&mut self, value_type: &D::Type) -> &Decomposition<D::Type> {
+        if self.caches.decompositions.get(value_type).is_none() {
+            let decomposition = self.operations.decompose_type(value_type);
+            self.caches
+                .decompositions
+                .insert(value_type.clone(), decomposition);
         }
 
-        let decomposition = self.operations.decompose_type(value_type);
         self.caches
             .decompositions
-            .insert(value_type.clone(), decomposition.clone());
-        decomposition
+            .get(value_type)
+            .expect("decomposition cache entry must exist")
     }
 
     fn is_decomposable(&mut self, value_type: &D::Type) -> bool {
@@ -547,17 +549,17 @@ impl<D: SpaceOperations> SpaceEngine<D> {
 
     fn decompose_type_spaces(&mut self, value_type: &D::Type) -> Vec<EngineSpace<D>> {
         match self.decomposition_for_type(value_type) {
-            Decomposition::NotDecomposable => Vec::new(),
-            Decomposition::Empty => Vec::new(),
-            Decomposition::Parts(parts) => parts
-                .into_iter()
-                .map(|decomposed_type| {
-                    Space::Type(TypeSpace {
-                        value_type: decomposed_type,
+            Decomposition::NotDecomposable | Decomposition::Empty => Vec::new(),
+            Decomposition::Parts(parts) => {
+                let mut spaces = Vec::with_capacity(parts.len());
+                for decomposed_type in parts {
+                    spaces.push(Space::Type(TypeSpace {
+                        value_type: decomposed_type.clone(),
                         introduced_by_decomposition: true,
-                    })
-                })
-                .collect(),
+                    }));
+                }
+                spaces
+            }
         }
     }
 
