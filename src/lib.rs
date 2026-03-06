@@ -620,9 +620,14 @@ impl<D: SpaceOperations> SpaceEngine<D> {
                     .collect(),
             ),
             (_, Space::Union(spaces)) => {
-                spaces.iter().fold(left_space.clone(), |remainder, member| {
-                    self.subtract(&remainder, member)
-                })
+                let mut remainder = left_space.clone();
+                for member in spaces {
+                    if remainder.is_empty() {
+                        break;
+                    }
+                    remainder = self.subtract(&remainder, member);
+                }
+                remainder
             }
             (Space::Type(left_type_space), Space::Type(right_type_space)) => {
                 if self
@@ -723,7 +728,7 @@ impl<D: SpaceOperations> SpaceEngine<D> {
 
                 if parameter_remainders
                     .iter()
-                    .all(|parameter_remainder| self.is_subspace(parameter_remainder, &Space::Empty))
+                    .all(|parameter_remainder| self.simplify(parameter_remainder).is_empty())
                 {
                     return Space::Empty;
                 }
