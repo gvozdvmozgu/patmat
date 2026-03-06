@@ -487,7 +487,113 @@ impl<D: SpaceOperations> SpaceEngine<D> {
         left_space: &EngineSpace<D>,
         right_space: &EngineSpace<D>,
     ) -> EngineSpace<D> {
-        self.intersect_spaces(left_space, right_space)
+        match (left_space, right_space) {
+            (Space::Empty, _) | (_, Space::Empty) => Space::Empty,
+            (_, Space::Union(spaces)) => Space::Union(
+                spaces
+                    .iter()
+                    .map(|member| self.intersect(left_space, member))
+                    .filter(|member| !member.is_empty())
+                    .collect(),
+            ),
+            (Space::Union(spaces), _) => Space::Union(
+                spaces
+                    .iter()
+                    .map(|member| self.intersect(member, right_space))
+                    .filter(|member| !member.is_empty())
+                    .collect(),
+            ),
+            (Space::Type(left_type_space), Space::Type(right_type_space)) => {
+                if self
+                    .operations
+                    .is_subtype(&left_type_space.value_type, &right_type_space.value_type)
+                {
+                    left_space.clone()
+                } else if self
+                    .operations
+                    .is_subtype(&right_type_space.value_type, &left_type_space.value_type)
+                {
+                    right_space.clone()
+                } else {
+                    self.build_atomic_intersection(
+                        &left_type_space.value_type,
+                        &right_type_space.value_type,
+                        left_space,
+                    )
+                }
+            }
+            (Space::Type(left_type_space), Space::Product(right_product_space)) => {
+                if self
+                    .operations
+                    .is_subtype(&right_product_space.value_type, &left_type_space.value_type)
+                {
+                    right_space.clone()
+                } else if self
+                    .operations
+                    .is_subtype(&left_type_space.value_type, &right_product_space.value_type)
+                {
+                    left_space.clone()
+                } else {
+                    self.build_atomic_intersection(
+                        &left_type_space.value_type,
+                        &right_product_space.value_type,
+                        right_space,
+                    )
+                }
+            }
+            (Space::Product(left_product_space), Space::Type(right_type_space)) => {
+                if self
+                    .operations
+                    .is_subtype(&left_product_space.value_type, &right_type_space.value_type)
+                    || self
+                        .operations
+                        .is_subtype(&right_type_space.value_type, &left_product_space.value_type)
+                {
+                    left_space.clone()
+                } else {
+                    self.build_atomic_intersection(
+                        &left_product_space.value_type,
+                        &right_type_space.value_type,
+                        left_space,
+                    )
+                }
+            }
+            (Space::Product(left_product_space), Space::Product(right_product_space)) => {
+                if !self.operations.extractors_are_equivalent(
+                    &left_product_space.extractor,
+                    &right_product_space.extractor,
+                ) || left_product_space.parameters.len() != right_product_space.parameters.len()
+                {
+                    return self.build_atomic_intersection(
+                        &left_product_space.value_type,
+                        &right_product_space.value_type,
+                        left_space,
+                    );
+                }
+
+                let intersected_parameters: Vec<_> = left_product_space
+                    .parameters
+                    .iter()
+                    .zip(&right_product_space.parameters)
+                    .map(|(left_parameter, right_parameter)| {
+                        self.intersect(left_parameter, right_parameter)
+                    })
+                    .collect();
+
+                if intersected_parameters
+                    .iter()
+                    .any(|member| self.simplify(member).is_empty())
+                {
+                    Space::Empty
+                } else {
+                    Space::Product(ProductSpace {
+                        value_type: left_product_space.value_type.clone(),
+                        extractor: left_product_space.extractor.clone(),
+                        parameters: intersected_parameters,
+                    })
+                }
+            }
+        }
     }
 
     /// Subtracts `right_space` from `left_space`.
@@ -496,7 +602,141 @@ impl<D: SpaceOperations> SpaceEngine<D> {
         left_space: &EngineSpace<D>,
         right_space: &EngineSpace<D>,
     ) -> EngineSpace<D> {
-        self.subtract_spaces(left_space, right_space)
+        match (left_space, right_space) {
+            (Space::Empty, _) => Space::Empty,
+            (_, Space::Empty) => left_space.clone(),
+            (Space::Union(spaces), _) => Space::Union(
+                spaces
+                    .iter()
+                    .map(|member| self.subtract(member, right_space))
+                    .collect(),
+            ),
+            (_, Space::Union(spaces)) => {
+                spaces.iter().fold(left_space.clone(), |remainder, member| {
+                    self.subtract(&remainder, member)
+                })
+            }
+            (Space::Type(left_type_space), Space::Type(right_type_space)) => {
+                if self
+                    .operations
+                    .is_subtype(&left_type_space.value_type, &right_type_space.value_type)
+                {
+                    Space::Empty
+                } else if self.is_decomposable(&left_type_space.value_type) {
+                    let decomposed_union = self.decomposed_type_union(&left_type_space.value_type);
+                    self.subtract(&decomposed_union, right_space)
+                } else if self.is_decomposable(&right_type_space.value_type) {
+                    let decomposed_union = self.decomposed_type_union(&right_type_space.value_type);
+                    self.subtract(left_space, &decomposed_union)
+                } else {
+                    left_space.clone()
+                }
+            }
+            (Space::Type(left_type_space), Space::Product(right_product_space)) => {
+                if self
+                    .operations
+                    .is_subtype(&left_type_space.value_type, &right_product_space.value_type)
+                    && self.operations.extractor_covers_type(
+                        &right_product_space.extractor,
+                        &left_type_space.value_type,
+                        right_product_space.parameters.len(),
+                    )
+                {
+                    let lifted_parameters = self
+                        .operations
+                        .extractor_parameter_types(
+                            &right_product_space.extractor,
+                            &left_type_space.value_type,
+                            right_product_space.parameters.len(),
+                        )
+                        .into_iter()
+                        .map(Space::atomic_type)
+                        .collect();
+                    let lifted_product_space = Space::Product(ProductSpace {
+                        value_type: left_type_space.value_type.clone(),
+                        extractor: right_product_space.extractor.clone(),
+                        parameters: lifted_parameters,
+                    });
+                    self.subtract(&lifted_product_space, right_space)
+                } else if self.is_decomposable(&left_type_space.value_type) {
+                    let decomposed_union = self.decomposed_type_union(&left_type_space.value_type);
+                    self.subtract(&decomposed_union, right_space)
+                } else {
+                    left_space.clone()
+                }
+            }
+            (Space::Product(left_product_space), Space::Type(right_type_space)) => {
+                if self
+                    .operations
+                    .is_subtype(&left_product_space.value_type, &right_type_space.value_type)
+                {
+                    Space::Empty
+                } else {
+                    let simplified_left = self.simplify(left_space);
+                    if simplified_left.is_empty() {
+                        Space::Empty
+                    } else if self.is_decomposable(&right_type_space.value_type) {
+                        let decomposed_union =
+                            self.decomposed_type_union(&right_type_space.value_type);
+                        self.subtract(left_space, &decomposed_union)
+                    } else {
+                        left_space.clone()
+                    }
+                }
+            }
+            (Space::Product(left_product_space), Space::Product(right_product_space)) => {
+                if !self.operations.extractors_are_equivalent(
+                    &left_product_space.extractor,
+                    &right_product_space.extractor,
+                ) || left_product_space.parameters.len() != right_product_space.parameters.len()
+                {
+                    return left_space.clone();
+                }
+
+                let parameter_remainders: Vec<_> = left_product_space
+                    .parameters
+                    .iter()
+                    .zip(&right_product_space.parameters)
+                    .map(|(left_parameter, right_parameter)| {
+                        self.subtract(left_parameter, right_parameter)
+                    })
+                    .collect();
+
+                if left_product_space
+                    .parameters
+                    .iter()
+                    .zip(&parameter_remainders)
+                    .any(|(left_parameter, parameter_remainder)| {
+                        self.is_subspace(left_parameter, parameter_remainder)
+                    })
+                {
+                    return left_space.clone();
+                }
+
+                if parameter_remainders
+                    .iter()
+                    .all(|parameter_remainder| self.is_subspace(parameter_remainder, &Space::Empty))
+                {
+                    return Space::Empty;
+                }
+
+                let mut remaining_spaces = Vec::new();
+                for (parameter_index, parameter_remainder) in
+                    parameter_remainders.iter().enumerate()
+                {
+                    for flattened_space in self.flatten_space(parameter_remainder) {
+                        let mut updated_parameters = left_product_space.parameters.clone();
+                        updated_parameters[parameter_index] = flattened_space;
+                        remaining_spaces.push(Space::Product(ProductSpace {
+                            value_type: left_product_space.value_type.clone(),
+                            extractor: left_product_space.extractor.clone(),
+                            parameters: updated_parameters,
+                        }));
+                    }
+                }
+                Space::Union(remaining_spaces)
+            }
+        }
     }
 
     /// Runs both exhaustivity and reachability analysis.
@@ -592,264 +832,6 @@ impl<D: SpaceOperations> SpaceEngine<D> {
                     unreachable!("atomic intersections only apply to atomic spaces")
                 }
             },
-        }
-    }
-}
-
-impl<D: SpaceOperations> SpaceEngine<D> {
-    fn intersect_spaces(
-        &mut self,
-        left_space: &EngineSpace<D>,
-        right_space: &EngineSpace<D>,
-    ) -> EngineSpace<D> {
-        match (left_space, right_space) {
-            (Space::Empty, _) | (_, Space::Empty) => Space::Empty,
-            (_, Space::Union(spaces)) => Space::Union(
-                spaces
-                    .iter()
-                    .map(|member| self.intersect_spaces(left_space, member))
-                    .filter(|member| !member.is_empty())
-                    .collect(),
-            ),
-            (Space::Union(spaces), _) => Space::Union(
-                spaces
-                    .iter()
-                    .map(|member| self.intersect_spaces(member, right_space))
-                    .filter(|member| !member.is_empty())
-                    .collect(),
-            ),
-            (Space::Type(left_type_space), Space::Type(right_type_space)) => {
-                if self
-                    .operations
-                    .is_subtype(&left_type_space.value_type, &right_type_space.value_type)
-                {
-                    left_space.clone()
-                } else if self
-                    .operations
-                    .is_subtype(&right_type_space.value_type, &left_type_space.value_type)
-                {
-                    right_space.clone()
-                } else {
-                    self.build_atomic_intersection(
-                        &left_type_space.value_type,
-                        &right_type_space.value_type,
-                        left_space,
-                    )
-                }
-            }
-            (Space::Type(left_type_space), Space::Product(right_product_space)) => {
-                if self
-                    .operations
-                    .is_subtype(&right_product_space.value_type, &left_type_space.value_type)
-                {
-                    right_space.clone()
-                } else if self
-                    .operations
-                    .is_subtype(&left_type_space.value_type, &right_product_space.value_type)
-                {
-                    left_space.clone()
-                } else {
-                    self.build_atomic_intersection(
-                        &left_type_space.value_type,
-                        &right_product_space.value_type,
-                        right_space,
-                    )
-                }
-            }
-            (Space::Product(left_product_space), Space::Type(right_type_space)) => {
-                if self
-                    .operations
-                    .is_subtype(&left_product_space.value_type, &right_type_space.value_type)
-                    || self
-                        .operations
-                        .is_subtype(&right_type_space.value_type, &left_product_space.value_type)
-                {
-                    left_space.clone()
-                } else {
-                    self.build_atomic_intersection(
-                        &left_product_space.value_type,
-                        &right_type_space.value_type,
-                        left_space,
-                    )
-                }
-            }
-            (Space::Product(left_product_space), Space::Product(right_product_space)) => {
-                if !self.operations.extractors_are_equivalent(
-                    &left_product_space.extractor,
-                    &right_product_space.extractor,
-                ) || left_product_space.parameters.len() != right_product_space.parameters.len()
-                {
-                    return self.build_atomic_intersection(
-                        &left_product_space.value_type,
-                        &right_product_space.value_type,
-                        left_space,
-                    );
-                }
-
-                let intersected_parameters: Vec<_> = left_product_space
-                    .parameters
-                    .iter()
-                    .zip(&right_product_space.parameters)
-                    .map(|(left_parameter, right_parameter)| {
-                        self.intersect_spaces(left_parameter, right_parameter)
-                    })
-                    .collect();
-
-                if intersected_parameters
-                    .iter()
-                    .any(|member| self.simplify(member).is_empty())
-                {
-                    Space::Empty
-                } else {
-                    Space::Product(ProductSpace {
-                        value_type: left_product_space.value_type.clone(),
-                        extractor: left_product_space.extractor.clone(),
-                        parameters: intersected_parameters,
-                    })
-                }
-            }
-        }
-    }
-
-    fn subtract_spaces(
-        &mut self,
-        left_space: &EngineSpace<D>,
-        right_space: &EngineSpace<D>,
-    ) -> EngineSpace<D> {
-        match (left_space, right_space) {
-            (Space::Empty, _) => Space::Empty,
-            (_, Space::Empty) => left_space.clone(),
-            (Space::Union(spaces), _) => Space::Union(
-                spaces
-                    .iter()
-                    .map(|member| self.subtract_spaces(member, right_space))
-                    .collect(),
-            ),
-            (_, Space::Union(spaces)) => {
-                spaces.iter().fold(left_space.clone(), |remainder, member| {
-                    self.subtract_spaces(&remainder, member)
-                })
-            }
-            (Space::Type(left_type_space), Space::Type(right_type_space)) => {
-                if self
-                    .operations
-                    .is_subtype(&left_type_space.value_type, &right_type_space.value_type)
-                {
-                    Space::Empty
-                } else if self.is_decomposable(&left_type_space.value_type) {
-                    let decomposed_union = self.decomposed_type_union(&left_type_space.value_type);
-                    self.subtract_spaces(&decomposed_union, right_space)
-                } else if self.is_decomposable(&right_type_space.value_type) {
-                    let decomposed_union = self.decomposed_type_union(&right_type_space.value_type);
-                    self.subtract_spaces(left_space, &decomposed_union)
-                } else {
-                    left_space.clone()
-                }
-            }
-            (Space::Type(left_type_space), Space::Product(right_product_space)) => {
-                if self
-                    .operations
-                    .is_subtype(&left_type_space.value_type, &right_product_space.value_type)
-                    && self.operations.extractor_covers_type(
-                        &right_product_space.extractor,
-                        &left_type_space.value_type,
-                        right_product_space.parameters.len(),
-                    )
-                {
-                    let lifted_parameters = self
-                        .operations
-                        .extractor_parameter_types(
-                            &right_product_space.extractor,
-                            &left_type_space.value_type,
-                            right_product_space.parameters.len(),
-                        )
-                        .into_iter()
-                        .map(Space::atomic_type)
-                        .collect();
-                    let lifted_product_space = Space::Product(ProductSpace {
-                        value_type: left_type_space.value_type.clone(),
-                        extractor: right_product_space.extractor.clone(),
-                        parameters: lifted_parameters,
-                    });
-                    self.subtract_spaces(&lifted_product_space, right_space)
-                } else if self.is_decomposable(&left_type_space.value_type) {
-                    let decomposed_union = self.decomposed_type_union(&left_type_space.value_type);
-                    self.subtract_spaces(&decomposed_union, right_space)
-                } else {
-                    left_space.clone()
-                }
-            }
-            (Space::Product(left_product_space), Space::Type(right_type_space)) => {
-                if self
-                    .operations
-                    .is_subtype(&left_product_space.value_type, &right_type_space.value_type)
-                {
-                    Space::Empty
-                } else {
-                    let simplified_left = self.simplify(left_space);
-                    if simplified_left.is_empty() {
-                        Space::Empty
-                    } else if self.is_decomposable(&right_type_space.value_type) {
-                        let decomposed_union =
-                            self.decomposed_type_union(&right_type_space.value_type);
-                        self.subtract_spaces(left_space, &decomposed_union)
-                    } else {
-                        left_space.clone()
-                    }
-                }
-            }
-            (Space::Product(left_product_space), Space::Product(right_product_space)) => {
-                if !self.operations.extractors_are_equivalent(
-                    &left_product_space.extractor,
-                    &right_product_space.extractor,
-                ) || left_product_space.parameters.len() != right_product_space.parameters.len()
-                {
-                    return left_space.clone();
-                }
-
-                let parameter_remainders: Vec<_> = left_product_space
-                    .parameters
-                    .iter()
-                    .zip(&right_product_space.parameters)
-                    .map(|(left_parameter, right_parameter)| {
-                        self.subtract_spaces(left_parameter, right_parameter)
-                    })
-                    .collect();
-
-                if left_product_space
-                    .parameters
-                    .iter()
-                    .zip(&parameter_remainders)
-                    .any(|(left_parameter, parameter_remainder)| {
-                        self.is_subspace(left_parameter, parameter_remainder)
-                    })
-                {
-                    return left_space.clone();
-                }
-
-                if parameter_remainders
-                    .iter()
-                    .all(|parameter_remainder| self.is_subspace(parameter_remainder, &Space::Empty))
-                {
-                    return Space::Empty;
-                }
-
-                let mut remaining_spaces = Vec::new();
-                for (parameter_index, parameter_remainder) in
-                    parameter_remainders.iter().enumerate()
-                {
-                    for flattened_space in self.flatten_space(parameter_remainder) {
-                        let mut updated_parameters = left_product_space.parameters.clone();
-                        updated_parameters[parameter_index] = flattened_space;
-                        remaining_spaces.push(Space::Product(ProductSpace {
-                            value_type: left_product_space.value_type.clone(),
-                            extractor: left_product_space.extractor.clone(),
-                            parameters: updated_parameters,
-                        }));
-                    }
-                }
-                Space::Union(remaining_spaces)
-            }
         }
     }
 
@@ -1107,7 +1089,7 @@ impl<D: SpaceOperations> SpaceEngine<D> {
                 }
             }
             (_, Space::Union(_)) => {
-                let remainder = self.subtract_spaces(left_space, right_space);
+                let remainder = self.subtract(left_space, right_space);
                 self.simplify(&remainder).is_empty()
             }
             (Space::Type(left_type_space), Space::Type(right_type_space)) => {
