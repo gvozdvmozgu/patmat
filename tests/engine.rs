@@ -149,3 +149,33 @@ fn unreachable_arm_can_report_joint_coverage() {
         }]
     );
 }
+
+#[test]
+fn reused_engine_returns_stable_results_before_and_after_clearing_caches() {
+    let mut engine = demo_engine();
+    let option_of_boolean = DemoType::Option(Box::new(DemoType::Bool));
+
+    let match_input = MatchInput::new(
+        type_space(option_of_boolean.clone()),
+        vec![
+            MatchArm::new(product_space(
+                option_of_boolean.clone(),
+                DemoExtractor::Some,
+                vec![type_space(DemoType::True)],
+            )),
+            MatchArm::new(type_space(DemoType::None)),
+        ],
+    );
+
+    let expected = engine.analyze_match(&match_input);
+
+    for _ in 0..3 {
+        assert_eq!(engine.analyze_match(&match_input), expected);
+    }
+
+    engine.clear_caches();
+
+    for _ in 0..2 {
+        assert_eq!(engine.analyze_match(&match_input), expected);
+    }
+}

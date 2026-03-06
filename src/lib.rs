@@ -497,19 +497,15 @@ impl<D: SpaceOperations> SpaceEngine<D> {
     ) -> EngineSpace<D> {
         match (left_space, right_space) {
             (Space::Empty, _) | (_, Space::Empty) => Space::Empty,
-            (_, Space::Union(spaces)) => Space::Union(
+            (_, Space::Union(spaces)) => Self::build_union(
                 spaces
                     .iter()
-                    .map(|member| self.intersect(left_space, member))
-                    .filter(|member| !member.is_empty())
-                    .collect(),
+                    .map(|member| self.intersect(left_space, member)),
             ),
-            (Space::Union(spaces), _) => Space::Union(
+            (Space::Union(spaces), _) => Self::build_union(
                 spaces
                     .iter()
-                    .map(|member| self.intersect(member, right_space))
-                    .filter(|member| !member.is_empty())
-                    .collect(),
+                    .map(|member| self.intersect(member, right_space)),
             ),
             (Space::Type(left_type_space), Space::Type(right_type_space)) => {
                 if self
@@ -572,28 +568,27 @@ impl<D: SpaceOperations> SpaceEngine<D> {
                     &right_product_space.extractor,
                 ) || left_product_space.parameters.len() != right_product_space.parameters.len()
                 {
-                    return self.build_atomic_intersection(
+                    self.build_atomic_intersection(
                         &left_product_space.value_type,
                         &right_product_space.value_type,
                         left_space,
-                    );
-                }
-
-                let intersected_parameters: Vec<_> = left_product_space
-                    .parameters
-                    .iter()
-                    .zip(&right_product_space.parameters)
-                    .map(|(left_parameter, right_parameter)| {
-                        self.intersect(left_parameter, right_parameter)
-                    })
-                    .collect();
-
-                if intersected_parameters
-                    .iter()
-                    .any(|member| self.simplify(member).is_empty())
-                {
-                    Space::Empty
+                    )
                 } else {
+                    let mut intersected_parameters =
+                        Vec::with_capacity(left_product_space.parameters.len());
+                    for (left_parameter, right_parameter) in left_product_space
+                        .parameters
+                        .iter()
+                        .zip(&right_product_space.parameters)
+                    {
+                        let intersected_parameter = self.intersect(left_parameter, right_parameter);
+                        let simplified_parameter = self.simplify(&intersected_parameter);
+                        if simplified_parameter.is_empty() {
+                            return Space::Empty;
+                        }
+                        intersected_parameters.push(simplified_parameter);
+                    }
+
                     Space::Product(ProductSpace {
                         value_type: left_product_space.value_type.clone(),
                         extractor: left_product_space.extractor.clone(),
@@ -613,11 +608,10 @@ impl<D: SpaceOperations> SpaceEngine<D> {
         match (left_space, right_space) {
             (Space::Empty, _) => Space::Empty,
             (_, Space::Empty) => left_space.clone(),
-            (Space::Union(spaces), _) => Space::Union(
+            (Space::Union(spaces), _) => Self::build_union(
                 spaces
                     .iter()
-                    .map(|member| self.subtract(member, right_space))
-                    .collect(),
+                    .map(|member| self.subtract(member, right_space)),
             ),
             (_, Space::Union(spaces)) => {
                 let mut remainder = left_space.clone();
@@ -703,51 +697,48 @@ impl<D: SpaceOperations> SpaceEngine<D> {
                     &right_product_space.extractor,
                 ) || left_product_space.parameters.len() != right_product_space.parameters.len()
                 {
-                    return left_space.clone();
-                }
+                    left_space.clone()
+                } else {
+                    let mut parameter_remainders =
+                        Vec::with_capacity(left_product_space.parameters.len());
+                    for (left_parameter, right_parameter) in left_product_space
+                        .parameters
+                        .iter()
+                        .zip(&right_product_space.parameters)
+                    {
+                        let parameter_remainder = self.subtract(left_parameter, right_parameter);
+                        parameter_remainders.push(self.simplify(&parameter_remainder));
+                    }
 
-                let parameter_remainders: Vec<_> = left_product_space
-                    .parameters
-                    .iter()
-                    .zip(&right_product_space.parameters)
-                    .map(|(left_parameter, right_parameter)| {
-                        self.subtract(left_parameter, right_parameter)
-                    })
-                    .collect();
-
-                if left_product_space
-                    .parameters
-                    .iter()
-                    .zip(&parameter_remainders)
-                    .any(|(left_parameter, parameter_remainder)| {
-                        self.is_subspace(left_parameter, parameter_remainder)
-                    })
-                {
-                    return left_space.clone();
-                }
-
-                if parameter_remainders
-                    .iter()
-                    .all(|parameter_remainder| self.simplify(parameter_remainder).is_empty())
-                {
-                    return Space::Empty;
-                }
-
-                let mut remaining_spaces = Vec::new();
-                for (parameter_index, parameter_remainder) in
-                    parameter_remainders.iter().enumerate()
-                {
-                    for flattened_space in self.flatten_space(parameter_remainder) {
-                        let mut updated_parameters = left_product_space.parameters.clone();
-                        updated_parameters[parameter_index] = flattened_space;
-                        remaining_spaces.push(Space::Product(ProductSpace {
-                            value_type: left_product_space.value_type.clone(),
-                            extractor: left_product_space.extractor.clone(),
-                            parameters: updated_parameters,
-                        }));
+                    if left_product_space
+                        .parameters
+                        .iter()
+                        .zip(&parameter_remainders)
+                        .any(|(left_parameter, parameter_remainder)| {
+                            self.is_subspace(left_parameter, parameter_remainder)
+                        })
+                    {
+                        left_space.clone()
+                    } else if parameter_remainders.iter().all(Space::is_empty) {
+                        Space::Empty
+                    } else {
+                        let mut remaining_spaces = Vec::new();
+                        for (parameter_index, parameter_remainder) in
+                            parameter_remainders.iter().enumerate()
+                        {
+                            for flattened_space in self.flatten_space(parameter_remainder) {
+                                let mut updated_parameters = left_product_space.parameters.clone();
+                                updated_parameters[parameter_index] = flattened_space;
+                                remaining_spaces.push(Space::Product(ProductSpace {
+                                    value_type: left_product_space.value_type.clone(),
+                                    extractor: left_product_space.extractor.clone(),
+                                    parameters: updated_parameters,
+                                }));
+                            }
+                        }
+                        Self::build_union(remaining_spaces)
                     }
                 }
-                Space::Union(remaining_spaces)
             }
         }
     }
@@ -820,7 +811,7 @@ impl<D: SpaceOperations> SpaceEngine<D> {
     }
 
     fn decomposed_type_union(&mut self, value_type: &D::Type) -> EngineSpace<D> {
-        Space::Union(self.decompose_type_spaces(value_type))
+        Self::build_union(self.decompose_type_spaces(value_type))
     }
 
     fn build_atomic_intersection(
@@ -928,7 +919,10 @@ impl<D: SpaceOperations> SpaceEngine<D> {
                 })
                 .collect();
 
-            if self.is_subspace(candidate_space, &Space::Union(remaining_spaces.clone())) {
+            if self.is_subspace(
+                candidate_space,
+                &Self::build_union(remaining_spaces.clone()),
+            ) {
                 return remaining_spaces;
             }
         }
@@ -1003,7 +997,7 @@ impl<D: SpaceOperations> SpaceEngine<D> {
         for (arm_index, arm) in match_input.arms.iter().enumerate() {
             let current_space = if arm.is_wildcard {
                 if let Some(null_space) = null_space {
-                    Space::Union(vec![arm.pattern_space.clone(), null_space.clone()])
+                    Self::build_union([arm.pattern_space.clone(), null_space.clone()])
                 } else {
                     arm.pattern_space.clone()
                 }
@@ -1038,7 +1032,7 @@ impl<D: SpaceOperations> SpaceEngine<D> {
                 && let Some(null_space) = null_space
                 && self.is_subspace(
                     &covered_space,
-                    &Space::Union(vec![previous_union.clone(), null_space.clone()]),
+                    &Self::build_union([previous_union.clone(), null_space.clone()]),
                 )
             {
                 emitted_only_null_warning = true;
@@ -1065,18 +1059,8 @@ impl<D: SpaceOperations> SpaceEngine<D> {
     }
 
     fn append_union_member(union: &mut EngineSpace<D>, member: EngineSpace<D>) {
-        if member.is_empty() {
-            return;
-        }
-
-        match union {
-            Space::Empty => *union = member,
-            Space::Union(members) => members.push(member),
-            _ => {
-                let existing = std::mem::replace(union, Space::Empty);
-                *union = Space::Union(vec![existing, member]);
-            }
-        }
+        let existing = std::mem::replace(union, Space::Empty);
+        *union = Self::build_union([existing, member]);
     }
 
     fn covering_arm_indices(
@@ -1207,5 +1191,12 @@ impl<D: SpaceOperations> SpaceEngine<D> {
                         })
             }
         }
+    }
+
+    fn build_union<I>(spaces: I) -> EngineSpace<D>
+    where
+        I: IntoIterator<Item = EngineSpace<D>>,
+    {
+        Space::union(spaces.into_iter().filter(|space| !space.is_empty()))
     }
 }
