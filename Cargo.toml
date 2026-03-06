@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "Generic space algebra for pattern-match exhaustivity and reachability analysis"
 readme = "README.md"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gvozdvmozgu/patmat"
 
 [dependencies]
 hashbrown = "0.16"
