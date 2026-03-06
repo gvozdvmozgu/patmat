@@ -945,32 +945,37 @@ impl<D: SpaceOperations> SpaceEngine<D> {
         &mut self,
         match_input: &MatchInput<D::Type, D::Extractor>,
     ) -> Vec<EngineSpace<D>> {
-        let pattern_union = Space::Union(
-            match_input
-                .arms
-                .iter()
-                .rev()
-                .map(|arm| {
-                    if arm.is_partial {
-                        Space::Empty
-                    } else {
-                        arm.pattern_space.clone()
-                    }
-                })
-                .collect(),
-        );
+        let mut remainder = match_input.scrutinee_space.clone();
 
-        let simplified_remainder =
-            self.subtract_simplified(&match_input.scrutinee_space, &pattern_union);
+        for arm in match_input.arms.iter().rev() {
+            if arm.is_partial {
+                continue;
+            }
+
+            if remainder.is_empty() {
+                break;
+            }
+
+            remainder = self.subtract(&remainder, &arm.pattern_space);
+        }
+
+        let simplified_remainder = self.simplify(&remainder);
         let uncovered_spaces = self.flatten_space(&simplified_remainder);
-        let filtered_spaces: Vec<_> = uncovered_spaces
-            .into_iter()
-            .filter(|space| {
-                !space.is_empty()
-                    && (!match_input.check_counterexample_satisfiability
-                        || self.operations.is_satisfiable(space))
-            })
-            .collect();
+        let mut filtered_spaces = Vec::with_capacity(uncovered_spaces.len());
+
+        for space in uncovered_spaces {
+            if space.is_empty() {
+                continue;
+            }
+
+            if match_input.check_counterexample_satisfiability
+                && !self.operations.is_satisfiable(&space)
+            {
+                continue;
+            }
+
+            filtered_spaces.push(space);
+        }
 
         if filtered_spaces.is_empty() {
             filtered_spaces
