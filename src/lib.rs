@@ -455,25 +455,28 @@ impl<D: SpaceOperations> SpaceEngine<D> {
     ) -> bool {
         let simplified_left = self.simplify(left_space);
         let simplified_right = self.simplify(right_space);
+        self.is_subspace_simplified(&simplified_left, &simplified_right)
+    }
 
-        if &simplified_left != left_space || &simplified_right != right_space {
-            return self.is_subspace(&simplified_left, &simplified_right);
-        }
-
-        if simplified_left.is_empty() {
+    fn is_subspace_simplified(
+        &mut self,
+        left_space: &EngineSpace<D>,
+        right_space: &EngineSpace<D>,
+    ) -> bool {
+        if left_space.is_empty() {
             return true;
         }
 
-        if simplified_right.is_empty() {
+        if right_space.is_empty() {
             return false;
         }
 
-        let cache_key = (simplified_left.clone(), simplified_right.clone());
+        let cache_key = (left_space.clone(), right_space.clone());
         if let Some(cached_result) = self.caches.subspace_results.get(&cache_key) {
             return *cached_result;
         }
 
-        let result = self.compute_subspace_relation(&simplified_left, &simplified_right);
+        let result = self.compute_subspace_relation(left_space, right_space);
         self.caches.subspace_results.insert(cache_key, result);
         result
     }
