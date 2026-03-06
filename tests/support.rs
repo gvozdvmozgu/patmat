@@ -85,11 +85,11 @@ impl SpaceOperations for DemoOperations {
         scrutinee_type: &Self::Type,
         arity: usize,
     ) -> bool {
-        match (extractor, scrutinee_type, arity) {
-            (DemoExtractor::Some, DemoType::Some(_), 1) => true,
-            (DemoExtractor::Pair, DemoType::Pair(_, _), 2) => true,
-            _ => false,
-        }
+        matches!(
+            (extractor, scrutinee_type, arity),
+            (DemoExtractor::Some, DemoType::Some(_), 1)
+                | (DemoExtractor::Pair, DemoType::Pair(_, _), 2)
+        )
     }
 
     fn intersect_atomic_types(

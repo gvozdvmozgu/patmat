@@ -988,14 +988,16 @@ impl<D: SpaceOperations> SpaceEngine<D> {
         &mut self,
         match_input: &MatchInput<D::Type, D::Extractor>,
     ) -> Vec<ReachabilityWarning> {
-        let mut warnings = Vec::new();
-        let mut covered_by_previous_arms: Vec<CoveredArm<D>> = Vec::new();
-        let mut deferred_arm_indices = Vec::new();
+        let mut warnings = Vec::with_capacity(match_input.arms.len());
+        let mut covered_by_previous_arms = Vec::with_capacity(match_input.arms.len());
+        let mut previous_union: EngineSpace<D> = Space::Empty;
+        let mut deferred_arm_indices = Vec::with_capacity(match_input.arms.len());
         let mut emitted_only_null_warning = false;
+        let null_space = match_input.null_space.as_ref();
 
         for (arm_index, arm) in match_input.arms.iter().enumerate() {
             let current_space = if arm.is_wildcard {
-                if let Some(null_space) = &match_input.null_space {
+                if let Some(null_space) = null_space {
                     Space::Union(vec![arm.pattern_space.clone(), null_space.clone()])
                 } else {
                     arm.pattern_space.clone()
@@ -1006,8 +1008,6 @@ impl<D: SpaceOperations> SpaceEngine<D> {
 
             let covered_space =
                 self.intersect_simplified(&current_space, &match_input.scrutinee_space);
-            let previous_union =
-                self.simplify(&Self::union_of_previous_arms(&covered_by_previous_arms));
 
             if previous_union.is_empty() && covered_space.is_empty() {
                 deferred_arm_indices.push(arm_index);
@@ -1030,13 +1030,10 @@ impl<D: SpaceOperations> SpaceEngine<D> {
                 });
             } else if arm.is_wildcard
                 && !emitted_only_null_warning
-                && match_input.null_space.is_some()
+                && let Some(null_space) = null_space
                 && self.is_subspace(
                     &covered_space,
-                    &Space::Union(vec![
-                        previous_union.clone(),
-                        match_input.null_space.clone().expect("null space checked"),
-                    ]),
+                    &Space::Union(vec![previous_union.clone(), null_space.clone()]),
                 )
             {
                 emitted_only_null_warning = true;
@@ -1050,7 +1047,8 @@ impl<D: SpaceOperations> SpaceEngine<D> {
                 });
             }
 
-            if !arm.is_partial {
+            if !arm.is_partial && !covered_space.is_empty() {
+                Self::append_union_member(&mut previous_union, covered_space.clone());
                 covered_by_previous_arms.push(CoveredArm {
                     arm_index,
                     covered_space,
@@ -1061,13 +1059,19 @@ impl<D: SpaceOperations> SpaceEngine<D> {
         warnings
     }
 
-    fn union_of_previous_arms(covered_by_previous_arms: &[CoveredArm<D>]) -> EngineSpace<D> {
-        Space::Union(
-            covered_by_previous_arms
-                .iter()
-                .map(|covered_arm| covered_arm.covered_space.clone())
-                .collect(),
-        )
+    fn append_union_member(union: &mut EngineSpace<D>, member: EngineSpace<D>) {
+        if member.is_empty() {
+            return;
+        }
+
+        match union {
+            Space::Empty => *union = member,
+            Space::Union(members) => members.push(member),
+            _ => {
+                let existing = std::mem::replace(union, Space::Empty);
+                *union = Space::Union(vec![existing, member]);
+            }
+        }
     }
 
     fn covering_arm_indices(

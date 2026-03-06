@@ -84,11 +84,11 @@ impl SpaceOperations for BenchOperations {
         scrutinee_type: &Self::Type,
         arity: usize,
     ) -> bool {
-        match (extractor, scrutinee_type, arity) {
-            (BenchExtractor::Some, BenchType::Some(_), 1) => true,
-            (BenchExtractor::Pair, BenchType::Pair(_, _), 2) => true,
-            _ => false,
-        }
+        matches!(
+            (extractor, scrutinee_type, arity),
+            (BenchExtractor::Some, BenchType::Some(_), 1)
+                | (BenchExtractor::Pair, BenchType::Pair(_, _), 2)
+        )
     }
 
     fn intersect_atomic_types(
