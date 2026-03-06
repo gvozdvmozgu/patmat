@@ -15,6 +15,23 @@ fn subspace_uses_type_decomposition() {
 }
 
 #[test]
+fn simplify_normalizes_nested_unions() {
+    let mut engine = demo_engine();
+
+    let nested_union = union_space([
+        union_space([type_space(DemoType::True), type_space(DemoType::False)]),
+        type_space(DemoType::Null),
+    ]);
+    let flat_union = union_space([
+        type_space(DemoType::True),
+        type_space(DemoType::False),
+        type_space(DemoType::Null),
+    ]);
+
+    assert_eq!(engine.simplify(&nested_union), flat_union);
+}
+
+#[test]
 fn subtraction_splits_product_spaces_along_remaining_dimensions() {
     let mut engine = demo_engine();
     let pair_type = DemoType::Pair(Box::new(DemoType::Bool), Box::new(DemoType::Bool));
@@ -42,6 +59,85 @@ fn subtraction_splits_product_spaces_along_remaining_dimensions() {
             pair_type,
             DemoExtractor::Pair,
             vec![type_space(DemoType::Bool), type_space(DemoType::True)],
+        ),
+    ]);
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn subtraction_flattens_product_remainders_without_changing_semantics() {
+    let mut engine = demo_engine();
+    let option_bool = DemoType::Option(Box::new(DemoType::Bool));
+    let pair_type = DemoType::Pair(Box::new(option_bool.clone()), Box::new(option_bool.clone()));
+
+    let left_space = product_space(
+        pair_type.clone(),
+        DemoExtractor::Pair,
+        vec![
+            type_space(option_bool.clone()),
+            type_space(option_bool.clone()),
+        ],
+    );
+    let right_space = product_space(
+        pair_type.clone(),
+        DemoExtractor::Pair,
+        vec![
+            product_space(
+                option_bool.clone(),
+                DemoExtractor::Some,
+                vec![type_space(DemoType::True)],
+            ),
+            product_space(
+                option_bool.clone(),
+                DemoExtractor::Some,
+                vec![type_space(DemoType::False)],
+            ),
+        ],
+    );
+
+    let remainder = engine.subtract(&left_space, &right_space);
+    let result = engine.simplify(&remainder);
+    let expected = union_space([
+        product_space(
+            pair_type.clone(),
+            DemoExtractor::Pair,
+            vec![
+                product_space(
+                    DemoType::Some(Box::new(DemoType::Bool)),
+                    DemoExtractor::Some,
+                    vec![type_space(DemoType::False)],
+                ),
+                type_space(option_bool.clone()),
+            ],
+        ),
+        product_space(
+            pair_type.clone(),
+            DemoExtractor::Pair,
+            vec![type_space(DemoType::None), type_space(option_bool.clone())],
+        ),
+        product_space(
+            pair_type,
+            DemoExtractor::Pair,
+            vec![
+                type_space(option_bool),
+                product_space(
+                    DemoType::Some(Box::new(DemoType::Bool)),
+                    DemoExtractor::Some,
+                    vec![type_space(DemoType::True)],
+                ),
+            ],
+        ),
+        product_space(
+            DemoType::Pair(
+                Box::new(DemoType::Option(Box::new(DemoType::Bool))),
+                Box::new(DemoType::Option(Box::new(DemoType::Bool))),
+            ),
+            DemoExtractor::Pair,
+            vec![
+                type_space(DemoType::Option(Box::new(DemoType::Bool))),
+                type_space(DemoType::None),
+            ],
         ),
     ]);
 

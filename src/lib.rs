@@ -345,6 +345,7 @@ struct Caches<D: SpaceOperations> {
     simplified_spaces: HashMap<EngineSpace<D>, EngineSpace<D>>,
     subspace_results: HashMap<(EngineSpace<D>, EngineSpace<D>), bool>,
     decompositions: HashMap<D::Type, Decomposition<D::Type>>,
+    decomposed_unions: HashMap<D::Type, EngineSpace<D>>,
 }
 
 impl<D: SpaceOperations> Caches<D> {
@@ -353,6 +354,7 @@ impl<D: SpaceOperations> Caches<D> {
             simplified_spaces: HashMap::new(),
             subspace_results: HashMap::new(),
             decompositions: HashMap::new(),
+            decomposed_unions: HashMap::new(),
         }
     }
 
@@ -360,6 +362,7 @@ impl<D: SpaceOperations> Caches<D> {
         self.simplified_spaces.clear();
         self.subspace_results.clear();
         self.decompositions.clear();
+        self.decomposed_unions.clear();
     }
 }
 
@@ -433,18 +436,16 @@ impl<D: SpaceOperations> SpaceEngine<D> {
                 for member in spaces {
                     let simplified_member = self.simplify(member);
                     changed |= &simplified_member != member;
-                    if simplified_member.is_empty() {
-                        changed = true;
-                        continue;
-                    }
-                    simplified_members.push(simplified_member);
+                    let previous_len = simplified_members.len();
+                    Self::extend_union_members(&mut simplified_members, simplified_member);
+                    changed |= simplified_members.len() != previous_len + 1;
                 }
 
-                match simplified_members.len() {
-                    0 => Space::Empty,
-                    1 => simplified_members.pop().expect("space length checked"),
-                    _ if !changed => space.clone(),
-                    _ => Space::Union(simplified_members),
+                let normalized_union = Self::union_from_members(simplified_members);
+                if !changed && normalized_union == *space {
+                    space.clone()
+                } else {
+                    normalized_union
                 }
             }
         };
@@ -491,6 +492,14 @@ impl<D: SpaceOperations> SpaceEngine<D> {
 
     /// Intersects two spaces.
     pub fn intersect(
+        &mut self,
+        left_space: &EngineSpace<D>,
+        right_space: &EngineSpace<D>,
+    ) -> EngineSpace<D> {
+        self.compute_intersection(left_space, right_space)
+    }
+
+    fn compute_intersection(
         &mut self,
         left_space: &EngineSpace<D>,
         right_space: &EngineSpace<D>,
@@ -605,6 +614,14 @@ impl<D: SpaceOperations> SpaceEngine<D> {
         left_space: &EngineSpace<D>,
         right_space: &EngineSpace<D>,
     ) -> EngineSpace<D> {
+        self.compute_subtraction(left_space, right_space)
+    }
+
+    fn compute_subtraction(
+        &mut self,
+        left_space: &EngineSpace<D>,
+        right_space: &EngineSpace<D>,
+    ) -> EngineSpace<D> {
         match (left_space, right_space) {
             (Space::Empty, _) => Space::Empty,
             (_, Space::Empty) => left_space.clone(),
@@ -685,7 +702,7 @@ impl<D: SpaceOperations> SpaceEngine<D> {
                     } else if self.is_decomposable(&right_type_space.value_type) {
                         let decomposed_union =
                             self.decomposed_type_union(&right_type_space.value_type);
-                        self.subtract(left_space, &decomposed_union)
+                        self.subtract(&simplified_left, &decomposed_union)
                     } else {
                         left_space.clone()
                     }
@@ -722,19 +739,31 @@ impl<D: SpaceOperations> SpaceEngine<D> {
                     } else if parameter_remainders.iter().all(Space::is_empty) {
                         Space::Empty
                     } else {
-                        let mut remaining_spaces = Vec::new();
+                        let mut flattened_parameter_remainders =
+                            Vec::with_capacity(parameter_remainders.len());
+                        let mut total_remaining_spaces = 0usize;
+
+                        for parameter_remainder in &parameter_remainders {
+                            let flattened = self.flatten_space(parameter_remainder);
+                            total_remaining_spaces += flattened.len();
+                            flattened_parameter_remainders.push(flattened);
+                        }
+
+                        let mut remaining_spaces = Vec::with_capacity(total_remaining_spaces);
+                        let mut reusable_parameters = left_product_space.parameters.clone();
                         for (parameter_index, parameter_remainder) in
-                            parameter_remainders.iter().enumerate()
+                            flattened_parameter_remainders.iter().enumerate()
                         {
-                            for flattened_space in self.flatten_space(parameter_remainder) {
-                                let mut updated_parameters = left_product_space.parameters.clone();
-                                updated_parameters[parameter_index] = flattened_space;
+                            for flattened_space in parameter_remainder {
+                                reusable_parameters[parameter_index] = flattened_space.clone();
                                 remaining_spaces.push(Space::Product(ProductSpace {
                                     value_type: left_product_space.value_type.clone(),
                                     extractor: left_product_space.extractor.clone(),
-                                    parameters: updated_parameters,
+                                    parameters: reusable_parameters.clone(),
                                 }));
                             }
+                            reusable_parameters[parameter_index] =
+                                left_product_space.parameters[parameter_index].clone();
                         }
                         Self::build_union(remaining_spaces)
                     }
@@ -770,7 +799,7 @@ impl<D: SpaceOperations> SpaceEngine<D> {
     }
 
     fn decomposition_for_type(&mut self, value_type: &D::Type) -> &Decomposition<D::Type> {
-        if self.caches.decompositions.get(value_type).is_none() {
+        if !self.caches.decompositions.contains_key(value_type) {
             let decomposition = self.operations.decompose_type(value_type);
             self.caches
                 .decompositions
@@ -794,9 +823,13 @@ impl<D: SpaceOperations> SpaceEngine<D> {
         )
     }
 
-    fn decompose_type_spaces(&mut self, value_type: &D::Type) -> Vec<EngineSpace<D>> {
-        match self.decomposition_for_type(value_type) {
-            Decomposition::NotDecomposable | Decomposition::Empty => Vec::new(),
+    fn decomposed_type_union(&mut self, value_type: &D::Type) -> EngineSpace<D> {
+        if let Some(cached_union) = self.caches.decomposed_unions.get(value_type) {
+            return cached_union.clone();
+        }
+
+        let decomposed_union = match self.decomposition_for_type(value_type) {
+            Decomposition::NotDecomposable | Decomposition::Empty => Space::Empty,
             Decomposition::Parts(parts) => {
                 let mut spaces = Vec::with_capacity(parts.len());
                 for decomposed_type in parts {
@@ -805,13 +838,14 @@ impl<D: SpaceOperations> SpaceEngine<D> {
                         introduced_by_decomposition: true,
                     }));
                 }
-                spaces
+                Self::build_union(spaces)
             }
-        }
-    }
+        };
 
-    fn decomposed_type_union(&mut self, value_type: &D::Type) -> EngineSpace<D> {
-        Self::build_union(self.decompose_type_spaces(value_type))
+        self.caches
+            .decomposed_unions
+            .insert(value_type.clone(), decomposed_union.clone());
+        decomposed_union
     }
 
     fn build_atomic_intersection(
@@ -840,6 +874,12 @@ impl<D: SpaceOperations> SpaceEngine<D> {
     }
 
     fn flatten_space(&mut self, space: &EngineSpace<D>) -> Vec<EngineSpace<D>> {
+        let mut flattened = Vec::new();
+        self.flatten_space_into(space, &mut flattened);
+        flattened
+    }
+
+    fn flatten_space_into(&mut self, space: &EngineSpace<D>, flattened: &mut Vec<EngineSpace<D>>) {
         match space {
             Space::Product(product_space) => {
                 let mut flattened_parameters = Vec::with_capacity(product_space.parameters.len());
@@ -847,7 +887,6 @@ impl<D: SpaceOperations> SpaceEngine<D> {
                     flattened_parameters.push(self.flatten_space(parameter));
                 }
 
-                let mut flattened_products = Vec::new();
                 let mut current = Vec::with_capacity(product_space.parameters.len());
                 Self::expand_flattened_product(
                     &product_space.value_type,
@@ -855,18 +894,15 @@ impl<D: SpaceOperations> SpaceEngine<D> {
                     &flattened_parameters,
                     0,
                     &mut current,
-                    &mut flattened_products,
+                    flattened,
                 );
-                flattened_products
             }
             Space::Union(spaces) => {
-                let mut flattened = Vec::new();
                 for member in spaces {
-                    flattened.extend(self.flatten_space(member));
+                    self.flatten_space_into(member, flattened);
                 }
-                flattened
             }
-            _ => vec![space.clone()],
+            _ => flattened.push(space.clone()),
         }
     }
 
@@ -1059,8 +1095,22 @@ impl<D: SpaceOperations> SpaceEngine<D> {
     }
 
     fn append_union_member(union: &mut EngineSpace<D>, member: EngineSpace<D>) {
-        let existing = std::mem::replace(union, Space::Empty);
-        *union = Self::build_union([existing, member]);
+        match union {
+            Space::Empty => *union = member,
+            Space::Union(members) => {
+                Self::extend_union_members(members, member);
+                if members.len() == 1 {
+                    *union = members.pop().expect("union length checked");
+                }
+            }
+            _ => {
+                let existing = std::mem::replace(union, Space::Empty);
+                let mut members = Vec::with_capacity(2);
+                Self::extend_union_members(&mut members, existing);
+                Self::extend_union_members(&mut members, member);
+                *union = Self::union_from_members(members);
+            }
+        }
     }
 
     fn covering_arm_indices(
@@ -1197,6 +1247,26 @@ impl<D: SpaceOperations> SpaceEngine<D> {
     where
         I: IntoIterator<Item = EngineSpace<D>>,
     {
-        Space::union(spaces.into_iter().filter(|space| !space.is_empty()))
+        let mut members = Vec::new();
+        for space in spaces {
+            Self::extend_union_members(&mut members, space);
+        }
+        Self::union_from_members(members)
+    }
+
+    fn extend_union_members(members: &mut Vec<EngineSpace<D>>, space: EngineSpace<D>) {
+        match space {
+            Space::Empty => {}
+            Space::Union(nested_members) => members.extend(nested_members),
+            other => members.push(other),
+        }
+    }
+
+    fn union_from_members(mut members: Vec<EngineSpace<D>>) -> EngineSpace<D> {
+        match members.len() {
+            0 => Space::Empty,
+            1 => members.pop().expect("union length checked"),
+            _ => Space::Union(members),
+        }
     }
 }
