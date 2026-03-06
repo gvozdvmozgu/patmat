@@ -403,17 +403,20 @@ impl<D: SpaceOperations> SpaceEngine<D> {
                 }
             }
             Space::Product(product_space) => {
-                let simplified_parameters: Vec<_> = product_space
-                    .parameters
-                    .iter()
-                    .map(|parameter| self.simplify(parameter))
-                    .collect();
+                let mut simplified_parameters = Vec::with_capacity(product_space.parameters.len());
+                let mut changed = false;
+
+                for parameter in &product_space.parameters {
+                    let simplified_parameter = self.simplify(parameter);
+                    changed |= &simplified_parameter != parameter;
+                    simplified_parameters.push(simplified_parameter);
+                }
 
                 if simplified_parameters.iter().any(Space::is_empty)
                     || self.type_is_uninhabited(&product_space.value_type)
                 {
                     Space::Empty
-                } else if simplified_parameters == product_space.parameters {
+                } else if !changed {
                     space.clone()
                 } else {
                     Space::Product(ProductSpace {
@@ -424,18 +427,23 @@ impl<D: SpaceOperations> SpaceEngine<D> {
                 }
             }
             Space::Union(spaces) => {
-                let simplified_members: Vec<_> = spaces
-                    .iter()
-                    .map(|member| self.simplify(member))
-                    .filter(|member| !member.is_empty())
-                    .collect();
+                let mut simplified_members = Vec::with_capacity(spaces.len());
+                let mut changed = false;
+
+                for member in spaces {
+                    let simplified_member = self.simplify(member);
+                    changed |= &simplified_member != member;
+                    if simplified_member.is_empty() {
+                        changed = true;
+                        continue;
+                    }
+                    simplified_members.push(simplified_member);
+                }
 
                 match simplified_members.len() {
                     0 => Space::Empty,
-                    1 => simplified_members
-                        .into_iter()
-                        .next()
-                        .expect("space length checked"),
+                    1 => simplified_members.pop().expect("space length checked"),
+                    _ if !changed => space.clone(),
                     _ => Space::Union(simplified_members),
                 }
             }
