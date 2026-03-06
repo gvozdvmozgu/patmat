@@ -846,39 +846,62 @@ impl<D: SpaceOperations> SpaceEngine<D> {
     fn flatten_space(&mut self, space: &EngineSpace<D>) -> Vec<EngineSpace<D>> {
         match space {
             Space::Product(product_space) => {
-                let mut partial_products: Vec<Vec<EngineSpace<D>>> = vec![Vec::new()];
-                for flattened_parameter in product_space
-                    .parameters
-                    .iter()
-                    .map(|parameter| self.flatten_space(parameter))
-                {
-                    let mut expanded_products = Vec::new();
-                    for partial_product in &partial_products {
-                        for space in &flattened_parameter {
-                            let mut next_product = partial_product.clone();
-                            next_product.push(space.clone());
-                            expanded_products.push(next_product);
-                        }
-                    }
-                    partial_products = expanded_products;
+                let mut flattened_parameters = Vec::with_capacity(product_space.parameters.len());
+                for parameter in &product_space.parameters {
+                    flattened_parameters.push(self.flatten_space(parameter));
                 }
 
-                partial_products
-                    .into_iter()
-                    .map(|parameters| {
-                        Space::Product(ProductSpace {
-                            value_type: product_space.value_type.clone(),
-                            extractor: product_space.extractor.clone(),
-                            parameters,
-                        })
-                    })
-                    .collect()
+                let mut flattened_products = Vec::new();
+                let mut current = Vec::with_capacity(product_space.parameters.len());
+                Self::expand_flattened_product(
+                    &product_space.value_type,
+                    &product_space.extractor,
+                    &flattened_parameters,
+                    0,
+                    &mut current,
+                    &mut flattened_products,
+                );
+                flattened_products
             }
-            Space::Union(spaces) => spaces
-                .iter()
-                .flat_map(|member| self.flatten_space(member))
-                .collect(),
+            Space::Union(spaces) => {
+                let mut flattened = Vec::new();
+                for member in spaces {
+                    flattened.extend(self.flatten_space(member));
+                }
+                flattened
+            }
             _ => vec![space.clone()],
+        }
+    }
+
+    fn expand_flattened_product(
+        value_type: &D::Type,
+        extractor: &D::Extractor,
+        flattened_parameters: &[Vec<EngineSpace<D>>],
+        parameter_index: usize,
+        current: &mut Vec<EngineSpace<D>>,
+        flattened_products: &mut Vec<EngineSpace<D>>,
+    ) {
+        if parameter_index == flattened_parameters.len() {
+            flattened_products.push(Space::Product(ProductSpace {
+                value_type: value_type.clone(),
+                extractor: extractor.clone(),
+                parameters: current.clone(),
+            }));
+            return;
+        }
+
+        for space in &flattened_parameters[parameter_index] {
+            current.push(space.clone());
+            Self::expand_flattened_product(
+                value_type,
+                extractor,
+                flattened_parameters,
+                parameter_index + 1,
+                current,
+                flattened_products,
+            );
+            current.pop();
         }
     }
 
