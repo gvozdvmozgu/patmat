@@ -1,0 +1,16 @@
+[package]
+name = "patmat"
+version = "0.1.0"
+edition = "2024"
+description = "Generic space algebra for pattern-match exhaustivity and reachability analysis"
+readme = "README.md"
+
+[dependencies]
+hashbrown = "0.16"
+
+[dev-dependencies]
+codspeed-criterion-compat = { version = "4.3", default-features = false }
+
+[[bench]]
+name = "match_analysis"
+harness = false
