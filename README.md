@@ -3,8 +3,8 @@
 [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge/github/gvozdvmozgu/patmat)](https://codspeed.io/gvozdvmozgu/patmat?utm_source=badge)
 
 `patmat` is a reusable Rust implementation of the space-based exhaustivity
-algorithm described in Fengyun Liu's paper, _A Generic Algorithm for Checking
-Exhaustivity of Pattern Matching_ (`p61-liu.pdf` in this repository).
+algorithm described in Fengyun Liu's paper,
+[_A Generic Algorithm for Checking Exhaustivity of Pattern Matching_](https://dl.acm.org/doi/10.1145/2998392.2998401).
 
 The crate models pattern matching as set algebra over spaces of values:
 
@@ -31,96 +31,6 @@ the `SpaceOperations` trait, which supplies:
 - irrefutability checks
 - atomic type intersections
 - optional satisfiability filtering for advanced type systems
-
-## Example
-
-```rust
-use patmat::{
-    check_match, AtomicIntersection, Decomposition, MatchArm, MatchInput, Space, SpaceOperations,
-};
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum BooleanType {
-    Bool,
-    True,
-    False,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum NoExtractor {}
-
-#[derive(Clone, Copy, Debug)]
-struct BooleanOperations;
-
-impl SpaceOperations for BooleanOperations {
-    type Type = BooleanType;
-    type Extractor = NoExtractor;
-
-    fn decompose_type(&self, value_type: &Self::Type) -> Decomposition<Self::Type> {
-        match value_type {
-            BooleanType::Bool => Decomposition::parts(vec![BooleanType::True, BooleanType::False]),
-            _ => Decomposition::NotDecomposable,
-        }
-    }
-
-    fn is_subtype(&self, left: &Self::Type, right: &Self::Type) -> bool {
-        left == right
-            || matches!(
-                (left, right),
-                (BooleanType::True, BooleanType::Bool)
-                    | (BooleanType::False, BooleanType::Bool)
-            )
-    }
-
-    fn extractors_are_equivalent(
-        &self,
-        _left: &Self::Extractor,
-        _right: &Self::Extractor,
-    ) -> bool {
-        false
-    }
-
-    fn extractor_parameter_types(
-        &self,
-        _extractor: &Self::Extractor,
-        _scrutinee_type: &Self::Type,
-        _arity: usize,
-    ) -> Vec<Self::Type> {
-        Vec::new()
-    }
-
-    fn extractor_covers_type(
-        &self,
-        _extractor: &Self::Extractor,
-        _scrutinee_type: &Self::Type,
-        _arity: usize,
-    ) -> bool {
-        false
-    }
-
-    fn intersect_atomic_types(
-        &self,
-        left: &Self::Type,
-        right: &Self::Type,
-    ) -> AtomicIntersection<Self::Type> {
-        if left == right {
-            AtomicIntersection::Type(left.clone())
-        } else {
-            AtomicIntersection::Empty
-        }
-    }
-}
-
-let input = MatchInput::new(
-    Space::of_type(BooleanType::Bool),
-    vec![
-        MatchArm::new(Space::of_type(BooleanType::True)),
-        MatchArm::new(Space::of_type(BooleanType::False)),
-    ],
-);
-
-assert!(check_match(BooleanOperations, &input).is_exhaustive());
-```
 
 ## Design Notes
 
