@@ -1,4 +1,6 @@
-use patmat::{AtomicIntersection, Decomposition, Space, SpaceEngine, SpaceOperations};
+use patmat::{
+    AtomicIntersection, Decomposition, Space, SpaceContext, SpaceEngine, SpaceOperations,
+};
 
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -121,25 +123,32 @@ impl SpaceOperations for DemoOperations {
 
 pub type DemoSpace = Space<DemoType, DemoExtractor>;
 
-pub fn demo_engine() -> SpaceEngine<DemoOperations> {
-    SpaceEngine::new(DemoOperations)
+pub type DemoContext = SpaceContext<DemoType, DemoExtractor>;
+
+pub fn demo_context() -> DemoContext {
+    SpaceContext::new()
 }
 
-pub fn type_space(value_type: DemoType) -> DemoSpace {
-    Space::of_type(value_type)
+pub fn demo_engine<'a>(context: &'a mut DemoContext) -> SpaceEngine<'a, DemoOperations> {
+    SpaceEngine::new(DemoOperations, context)
 }
 
 pub fn product_space(
+    context: &mut DemoContext,
     value_type: DemoType,
     extractor: DemoExtractor,
     parameters: Vec<DemoSpace>,
 ) -> DemoSpace {
-    Space::product(value_type, extractor, parameters)
+    context.product(value_type, extractor, parameters)
 }
 
-pub fn union_space<I>(spaces: I) -> DemoSpace
+pub fn type_space(context: &mut DemoContext, value_type: DemoType) -> DemoSpace {
+    context.of_type(value_type)
+}
+
+pub fn union_space<I>(context: &mut DemoContext, spaces: I) -> DemoSpace
 where
     I: IntoIterator<Item = DemoSpace>,
 {
-    Space::union(spaces)
+    context.union(spaces)
 }

@@ -1,9 +1,9 @@
 use codspeed_criterion_compat::{
-    BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main,
+    BenchmarkId, Criterion, black_box, criterion_group, criterion_main,
 };
 use patmat::{
-    AtomicIntersection, Decomposition, MatchArm, MatchInput, Space, SpaceEngine, SpaceOperations,
-    check_match,
+    AtomicIntersection, Decomposition, MatchArm, MatchInput, Space, SpaceContext, SpaceEngine,
+    SpaceOperations, check_match,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -113,94 +113,125 @@ impl SpaceOperations for BenchOperations {
 }
 
 type BenchSpace = Space<BenchType, BenchExtractor>;
+type BenchContext = SpaceContext<BenchType, BenchExtractor>;
 
-fn type_space(value_type: BenchType) -> BenchSpace {
-    Space::of_type(value_type)
+struct BenchFixture {
+    context: BenchContext,
+    input: MatchInput<BenchType, BenchExtractor>,
+}
+
+fn type_space(context: &mut BenchContext, value_type: BenchType) -> BenchSpace {
+    context.of_type(value_type)
 }
 
 fn product_space(
+    context: &mut BenchContext,
     value_type: BenchType,
     extractor: BenchExtractor,
     parameters: Vec<BenchSpace>,
 ) -> BenchSpace {
-    Space::product(value_type, extractor, parameters)
+    context.product(value_type, extractor, parameters)
 }
 
 fn pair_type(left: BenchType, right: BenchType) -> BenchType {
     BenchType::Pair(Box::new(left), Box::new(right))
 }
 
-fn option_bool_case(choice: u8, option_bool: &BenchType) -> BenchSpace {
+fn option_bool_case(context: &mut BenchContext, choice: u8, option_bool: &BenchType) -> BenchSpace {
     match choice {
-        0 => type_space(BenchType::None),
-        1 => product_space(
-            option_bool.clone(),
-            BenchExtractor::Some,
-            vec![type_space(BenchType::True)],
-        ),
-        2 => product_space(
-            option_bool.clone(),
-            BenchExtractor::Some,
-            vec![type_space(BenchType::False)],
-        ),
+        0 => type_space(context, BenchType::None),
+        1 => {
+            let true_space = type_space(context, BenchType::True);
+            product_space(
+                context,
+                option_bool.clone(),
+                BenchExtractor::Some,
+                vec![true_space],
+            )
+        }
+        2 => {
+            let false_space = type_space(context, BenchType::False);
+            product_space(
+                context,
+                option_bool.clone(),
+                BenchExtractor::Some,
+                vec![false_space],
+            )
+        }
         _ => panic!("invalid option<bool> benchmark case"),
     }
 }
 
-fn build_small_input() -> MatchInput<BenchType, BenchExtractor> {
+fn build_small_fixture() -> BenchFixture {
+    let mut context = BenchContext::new();
     let option_bool = BenchType::Option(Box::new(BenchType::Bool));
     let pair_of_options = pair_type(option_bool.clone(), option_bool.clone());
 
+    let true_space = type_space(&mut context, BenchType::True);
+    let false_space = type_space(&mut context, BenchType::False);
     let some_true = product_space(
+        &mut context,
         option_bool.clone(),
         BenchExtractor::Some,
-        vec![type_space(BenchType::True)],
+        vec![true_space],
     );
     let some_false = product_space(
+        &mut context,
         option_bool.clone(),
         BenchExtractor::Some,
-        vec![type_space(BenchType::False)],
+        vec![false_space],
     );
+    let none_space = type_space(&mut context, BenchType::None);
+    let option_space = type_space(&mut context, option_bool.clone());
 
-    MatchInput::new(
-        type_space(pair_of_options.clone()),
+    let input = MatchInput::new(
+        type_space(&mut context, pair_of_options.clone()),
         vec![
             MatchArm::new(product_space(
+                &mut context,
                 pair_of_options.clone(),
                 BenchExtractor::Pair,
-                vec![some_true.clone(), some_true.clone()],
+                vec![some_true, some_true],
             )),
             MatchArm::new(product_space(
+                &mut context,
                 pair_of_options.clone(),
                 BenchExtractor::Pair,
-                vec![some_true.clone(), some_false.clone()],
+                vec![some_true, some_false],
             )),
             MatchArm::new(product_space(
+                &mut context,
                 pair_of_options.clone(),
                 BenchExtractor::Pair,
-                vec![some_false.clone(), some_true.clone()],
+                vec![some_false, some_true],
             )),
             MatchArm::new(product_space(
+                &mut context,
                 pair_of_options.clone(),
                 BenchExtractor::Pair,
-                vec![some_false.clone(), some_false.clone()],
+                vec![some_false, some_false],
             )),
             MatchArm::new(product_space(
+                &mut context,
                 pair_of_options.clone(),
                 BenchExtractor::Pair,
-                vec![type_space(BenchType::None), type_space(option_bool.clone())],
+                vec![none_space, option_space],
             )),
             MatchArm::new(product_space(
+                &mut context,
                 pair_of_options.clone(),
                 BenchExtractor::Pair,
-                vec![type_space(option_bool.clone()), type_space(BenchType::None)],
+                vec![option_space, none_space],
             )),
-            MatchArm::wildcard(type_space(pair_of_options)),
+            MatchArm::wildcard(type_space(&mut context, pair_of_options)),
         ],
-    )
+    );
+
+    BenchFixture { context, input }
 }
 
-fn build_big_input() -> MatchInput<BenchType, BenchExtractor> {
+fn build_big_fixture() -> BenchFixture {
+    let mut context = BenchContext::new();
     let option_bool = BenchType::Option(Box::new(BenchType::Bool));
     let left_pair = pair_type(option_bool.clone(), option_bool.clone());
     let right_pair = pair_type(option_bool.clone(), option_bool.clone());
@@ -211,24 +242,25 @@ fn build_big_input() -> MatchInput<BenchType, BenchExtractor> {
         for second in 0..3 {
             for third in 0..3 {
                 for fourth in 0..3 {
+                    let left_first = option_bool_case(&mut context, first, &option_bool);
+                    let left_second = option_bool_case(&mut context, second, &option_bool);
                     let left_space = product_space(
+                        &mut context,
                         left_pair.clone(),
                         BenchExtractor::Pair,
-                        vec![
-                            option_bool_case(first, &option_bool),
-                            option_bool_case(second, &option_bool),
-                        ],
+                        vec![left_first, left_second],
                     );
+                    let right_first = option_bool_case(&mut context, third, &option_bool);
+                    let right_second = option_bool_case(&mut context, fourth, &option_bool);
                     let right_space = product_space(
+                        &mut context,
                         right_pair.clone(),
                         BenchExtractor::Pair,
-                        vec![
-                            option_bool_case(third, &option_bool),
-                            option_bool_case(fourth, &option_bool),
-                        ],
+                        vec![right_first, right_second],
                     );
 
                     arms.push(MatchArm::new(product_space(
+                        &mut context,
                         scrutinee_type.clone(),
                         BenchExtractor::Pair,
                         vec![left_space, right_space],
@@ -238,44 +270,41 @@ fn build_big_input() -> MatchInput<BenchType, BenchExtractor> {
         }
     }
 
-    MatchInput::new(type_space(scrutinee_type), arms)
+    let input = MatchInput::new(type_space(&mut context, scrutinee_type), arms);
+    BenchFixture { context, input }
 }
 
 fn bench_match_analysis(c: &mut Criterion) {
     let mut group = c.benchmark_group("match_analysis");
-    let inputs = [("small", build_small_input()), ("big", build_big_input())];
+    let mut fixtures = [
+        ("small", build_small_fixture()),
+        ("big", build_big_fixture()),
+    ];
 
-    for (size, input) in &inputs {
-        // Public API benchmark: includes SpaceEngine construction each iteration.
-        group.bench_with_input(BenchmarkId::new("check_match", size), input, |b, input| {
-            b.iter(|| black_box(check_match(BenchOperations, black_box(input))));
+    for (size, fixture) in &mut fixtures {
+        let size = *size;
+        group.bench_function(BenchmarkId::new("check_match", size), |b| {
+            b.iter(|| {
+                black_box(check_match(
+                    BenchOperations,
+                    &mut fixture.context,
+                    &fixture.input,
+                ))
+            });
         });
 
-        // Explicit cold-engine benchmark.
-        group.bench_with_input(BenchmarkId::new("engine_cold", size), input, |b, input| {
-            b.iter_batched(
-                || SpaceEngine::new(BenchOperations),
-                |mut engine| black_box(engine.analyze_match(black_box(input))),
-                BatchSize::SmallInput,
-            );
+        group.bench_function(BenchmarkId::new("engine_cold", size), |b| {
+            b.iter(|| {
+                let mut engine = SpaceEngine::new(BenchOperations, &mut fixture.context);
+                black_box(engine.analyze_match(&fixture.input))
+            });
         });
 
-        // Hot-cache benchmark: warm caches outside the timed call.
-        group.bench_with_input(
-            BenchmarkId::new("engine_hot_cache", size),
-            input,
-            |b, input| {
-                b.iter_batched(
-                    || {
-                        let mut engine = SpaceEngine::new(BenchOperations);
-                        let _ = engine.analyze_match(input);
-                        engine
-                    },
-                    |mut engine| black_box(engine.analyze_match(black_box(input))),
-                    BatchSize::SmallInput,
-                );
-            },
-        );
+        group.bench_function(BenchmarkId::new("engine_hot_cache", size), |b| {
+            let mut engine = SpaceEngine::new(BenchOperations, &mut fixture.context);
+            let _ = engine.analyze_match(&fixture.input);
+            b.iter(|| black_box(engine.analyze_match(&fixture.input)));
+        });
     }
 
     group.finish();
