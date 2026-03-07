@@ -4,7 +4,7 @@ use patmat::{
 
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum DemoType {
+pub(crate) enum DemoType {
     Never,
     Any,
     Bool,
@@ -18,13 +18,13 @@ pub enum DemoType {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum DemoExtractor {
+pub(crate) enum DemoExtractor {
     Some,
     Pair,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct DemoOperations;
+pub(crate) struct DemoOperations;
 
 impl SpaceOperations for DemoOperations {
     type Type = DemoType;
@@ -121,19 +121,18 @@ impl SpaceOperations for DemoOperations {
     }
 }
 
-pub type DemoSpace = Space<DemoType, DemoExtractor>;
+pub(crate) type DemoSpace = Space<DemoType, DemoExtractor>;
+pub(crate) type DemoContext = SpaceContext<DemoType, DemoExtractor>;
 
-pub type DemoContext = SpaceContext<DemoType, DemoExtractor>;
-
-pub fn demo_context() -> DemoContext {
+pub(crate) fn demo_context() -> DemoContext {
     SpaceContext::new()
 }
 
-pub fn demo_engine<'a>(context: &'a mut DemoContext) -> SpaceEngine<'a, DemoOperations> {
+pub(crate) fn demo_engine<'a>(context: &'a mut DemoContext) -> SpaceEngine<'a, DemoOperations> {
     SpaceEngine::new(DemoOperations, context)
 }
 
-pub fn product_space(
+pub(crate) fn product_space(
     context: &mut DemoContext,
     value_type: DemoType,
     extractor: DemoExtractor,
@@ -142,11 +141,11 @@ pub fn product_space(
     context.product(value_type, extractor, parameters)
 }
 
-pub fn type_space(context: &mut DemoContext, value_type: DemoType) -> DemoSpace {
+pub(crate) fn type_space(context: &mut DemoContext, value_type: DemoType) -> DemoSpace {
     context.of_type(value_type)
 }
 
-pub fn union_space<I>(context: &mut DemoContext, spaces: I) -> DemoSpace
+pub(crate) fn union_space<I>(context: &mut DemoContext, spaces: I) -> DemoSpace
 where
     I: IntoIterator<Item = DemoSpace>,
 {
