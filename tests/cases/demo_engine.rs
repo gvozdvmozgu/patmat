@@ -1,9 +1,7 @@
-mod support;
-
-use patmat::{MatchArm, MatchInput, ReachabilityWarning};
-use support::{
+use crate::support::demo::{
     DemoExtractor, DemoType, demo_context, demo_engine, product_space, type_space, union_space,
 };
+use patmat::{MatchArm, MatchInput, ReachabilityWarning};
 
 #[test]
 fn subspace_uses_type_decomposition() {
