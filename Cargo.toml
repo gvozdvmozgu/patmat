@@ -8,7 +8,9 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/gvozdvmozgu/patmat"
 
 [dependencies]
+foldhash = "0.2.0"
 hashbrown = "0.16"
+indexmap = "2.11"
 
 [dev-dependencies]
 codspeed-criterion-compat = { version = "4.3", default-features = false }

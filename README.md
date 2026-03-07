@@ -6,12 +6,17 @@
 algorithm described in Fengyun Liu's paper,
 [_A Generic Algorithm for Checking Exhaustivity of Pattern Matching_](https://dl.acm.org/doi/10.1145/2998392.2998401).
 
-The crate models pattern matching as set algebra over spaces of values:
+The crate models pattern matching as set algebra over spaces of values. Spaces
+are interned inside a `SpaceContext`, and `Space` values are small copyable
+handles scoped to that context:
 
-- `Space::Empty` represents the empty set.
-- `Space::Type` represents every value inhabiting a type.
-- `Space::Product` represents values accepted by an extractor or constructor.
-- `Space::Union` represents the union of multiple spaces.
+- `SpaceContext::empty()` represents the empty set.
+- `SpaceContext::of_type(...)` represents every value inhabiting a type.
+- `SpaceContext::product(...)` represents values accepted by an extractor or constructor.
+- `SpaceContext::union(...)` represents the union of multiple spaces.
+
+Use `Space::kind(&context)` or `SpaceContext::kind(space)` when you need to
+inspect whether a value is empty, type-based, product-based, or a union.
 
 With that model, exhaustivity becomes a containment question:
 
