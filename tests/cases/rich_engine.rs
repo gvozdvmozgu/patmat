@@ -234,6 +234,30 @@ fn subtract_covers_type_and_union_paths() {
 }
 
 #[test]
+fn subtract_type_minus_large_union_keeps_only_uncovered_decomposition_parts() {
+    let mut context = rich_context();
+
+    let leaf_set = context.of_type(RichType::LeafSet);
+    let covered_leaves: Vec<_> = (0..11)
+        .map(|i| context.of_type(RichType::Leaf(i)))
+        .collect();
+    let covered_union = context.union(covered_leaves.iter().copied());
+    let last_leaf = context.of_type(RichType::Leaf(11));
+    let fully_covered_union = context.union(
+        covered_leaves
+            .iter()
+            .copied()
+            .chain(std::iter::once(last_leaf)),
+    );
+
+    let mut engine = rich_engine(&mut context);
+
+    assert_eq!(engine.subtract(leaf_set, covered_union), last_leaf);
+    assert!(!engine.is_subspace(leaf_set, covered_union));
+    assert!(engine.is_subspace(leaf_set, fully_covered_union));
+}
+
+#[test]
 fn subtract_covers_type_product_and_product_type_paths() {
     let mut context = rich_context();
 
@@ -325,6 +349,65 @@ fn subtract_product_product_covers_shape_and_remainder_cases() {
     );
     assert!(engine.subtract(left_pair, same_as_left).is_empty());
     assert_eq!(engine.subtract(left_pair, right_pair), expected_partial);
+}
+
+#[test]
+fn subtract_product_product_preserves_multi_parameter_remainder_unions() {
+    let mut context = rich_context();
+
+    let option_bool = context.of_type(RichType::OptionBool);
+    let true_space = context.of_type(RichType::True);
+    let false_space = context.of_type(RichType::False);
+    let none_space = context.of_type(RichType::NoneTy);
+
+    let left_pair = context.product(
+        RichType::PairBool,
+        RichExtractor::Pair,
+        vec![option_bool, option_bool],
+    );
+    let some_true = context.product(RichType::OptionBool, RichExtractor::Some, vec![true_space]);
+    let some_false = context.product(
+        RichType::OptionBool,
+        RichExtractor::SomeAlias,
+        vec![false_space],
+    );
+    let right_pair = context.product(
+        RichType::PairBool,
+        RichExtractor::PairAlias,
+        vec![some_true, some_false],
+    );
+    let some_false_specific =
+        context.product(RichType::SomeBool, RichExtractor::Some, vec![false_space]);
+    let some_true_specific = context.product(
+        RichType::SomeBool,
+        RichExtractor::SomeAlias,
+        vec![true_space],
+    );
+    let expected_a = context.product(
+        RichType::PairBool,
+        RichExtractor::Pair,
+        vec![some_false_specific, option_bool],
+    );
+    let expected_b = context.product(
+        RichType::PairBool,
+        RichExtractor::Pair,
+        vec![none_space, option_bool],
+    );
+    let expected_c = context.product(
+        RichType::PairBool,
+        RichExtractor::Pair,
+        vec![option_bool, some_true_specific],
+    );
+    let expected_d = context.product(
+        RichType::PairBool,
+        RichExtractor::Pair,
+        vec![option_bool, none_space],
+    );
+    let expected = context.union([expected_a, expected_b, expected_c, expected_d]);
+
+    let mut engine = rich_engine(&mut context);
+
+    assert_eq!(engine.subtract(left_pair, right_pair), expected);
 }
 
 #[test]
@@ -446,6 +529,34 @@ fn analyze_match_flattens_zero_arity_and_cross_product_spaces() {
         analysis.uncovered_spaces,
         vec![zero_arity, tt, tf_pair, ft, ff]
     );
+}
+
+#[test]
+fn analyze_match_flattens_single_parameter_products_in_order() {
+    let mut context = rich_context();
+
+    let true_space = context.of_type(RichType::True);
+    let false_space = context.of_type(RichType::False);
+    let tf = context.union([true_space, false_space]);
+    let some_tf = context.product(RichType::OptionBool, RichExtractor::SomeAlias, vec![tf]);
+    let some_true = context.product(
+        RichType::OptionBool,
+        RichExtractor::SomeAlias,
+        vec![true_space],
+    );
+    let some_false = context.product(
+        RichType::OptionBool,
+        RichExtractor::SomeAlias,
+        vec![false_space],
+    );
+
+    let analysis = check_match(
+        RichOperations,
+        &mut context,
+        &MatchInput::new(some_tf, vec![]),
+    );
+
+    assert_eq!(analysis.uncovered_spaces, vec![some_true, some_false]);
 }
 
 #[test]

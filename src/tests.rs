@@ -8,6 +8,8 @@ use std::marker::PhantomData;
 enum TestType {
     True,
     False,
+    Never,
+    Recursive,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -21,7 +23,11 @@ impl SpaceOperations for TestOperations {
     type Extractor = TestExtractor;
 
     fn decompose_type(&self, _value_type: &Self::Type) -> Decomposition<Self::Type> {
-        Decomposition::NotDecomposable
+        match _value_type {
+            TestType::Never => Decomposition::Empty,
+            TestType::Recursive => Decomposition::parts(vec![TestType::Recursive]),
+            TestType::True | TestType::False => Decomposition::NotDecomposable,
+        }
     }
 
     fn is_subtype(&self, left: &Self::Type, right: &Self::Type) -> bool {
@@ -123,4 +129,34 @@ fn check_match_accepts_borrowed_operations() {
 
     assert!(analysis.is_exhaustive());
     assert!(analysis.reachability_warnings.is_empty());
+}
+
+#[test]
+fn estimated_space_size_covers_empty_recursive_and_union_cases() {
+    let mut context: SpaceContext<TestType, TestExtractor> = SpaceContext::new();
+    let empty = context.empty();
+    let true_space = context.of_type(TestType::True);
+    let false_space = context.of_type(TestType::False);
+    let never_space = context.of_type(TestType::Never);
+    let recursive_space = context.of_type(TestType::Recursive);
+    let union_space = context.union([true_space, false_space, never_space]);
+    let mut engine = SpaceEngine::new(TestOperations, &mut context);
+
+    assert_eq!(engine.estimated_space_size(empty), 0);
+    assert_eq!(engine.estimated_space_size(never_space), 0);
+    assert_eq!(engine.estimated_space_size(recursive_space), 1);
+    assert_eq!(engine.estimated_space_size(union_space), 2);
+}
+
+#[test]
+fn subtract_uses_filtered_empty_type_decomposition() {
+    let mut context: SpaceContext<TestType, TestExtractor> = SpaceContext::new();
+    let never_space = context.of_type(TestType::Never);
+    let true_space = context.of_type(TestType::True);
+    let false_space = context.of_type(TestType::False);
+    let covered_union = context.union([true_space, false_space]);
+    let mut engine = SpaceEngine::new(TestOperations, &mut context);
+
+    assert!(engine.subtract(never_space, covered_union).is_empty());
+    assert!(engine.is_subspace(never_space, covered_union));
 }

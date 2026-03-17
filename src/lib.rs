@@ -1,14 +1,14 @@
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 
-use std::{error::Error, fmt, hash::Hash, marker::PhantomData};
+use std::{cmp::Reverse, error::Error, fmt, hash::Hash, marker::PhantomData};
 
 type Hasher = foldhash::fast::RandomState;
 type IndexSet<T> = indexmap::IndexSet<T, Hasher>;
 type HashMap<K, V> = hashbrown::HashMap<K, V, Hasher>;
+type HashSet<T> = hashbrown::HashSet<T, Hasher>;
 
 const EMPTY_SPACE_ID: u32 = 0;
-const SUBSUMPTION_PRUNING_LIMIT: usize = 10;
 
 #[inline]
 fn index_to_u32(index: usize, kind: &str) -> u32 {
@@ -815,6 +815,49 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
         self.build_union(mapped)
     }
 
+    fn build_pruned_union_from_members(&mut self, spaces: Vec<EngineSpace<O>>) -> EngineSpace<O> {
+        let mut flattened_members = Vec::new();
+        for space in spaces {
+            self.context
+                .extend_union_members(&mut flattened_members, space);
+        }
+
+        let mut useful_members = Vec::with_capacity(flattened_members.len());
+        for space in flattened_members {
+            let already_covered = useful_members
+                .iter()
+                .copied()
+                .any(|previous_space| self.is_subspace(space, previous_space));
+            if !already_covered {
+                useful_members.push(space);
+            }
+        }
+
+        self.context.union_from_members(useful_members)
+    }
+
+    fn filtered_decomposed_type_union(
+        &mut self,
+        value_type: Type,
+        covering_space: EngineSpace<O>,
+    ) -> Option<EngineSpace<O>> {
+        let parts = match self.decomposition_for_type(value_type) {
+            Decomposition::NotDecomposable => return None,
+            Decomposition::Empty => return Some(self.empty_space()),
+            Decomposition::Parts(parts) => parts.clone(),
+        };
+
+        let mut uncovered_parts = Vec::with_capacity(parts.len());
+        for part in parts {
+            let part_space = self.make_type_space_from_id(part, true);
+            if !self.is_subspace(part_space, covering_space) {
+                uncovered_parts.push(part_space);
+            }
+        }
+
+        Some(self.build_union(uncovered_parts))
+    }
+
     fn lifted_product_space(
         &mut self,
         scrutinee_type: Type,
@@ -1118,12 +1161,25 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
             (_, None) => left_space,
             (Some(SpaceNode::Union(members)), _) => {
                 let members = members.to_vec();
-                self.map_union_members(members, |engine, member| {
-                    engine.subtract(member, right_space)
-                })
+                let mut remainders = Vec::with_capacity(members.len());
+                for member in members {
+                    remainders.push(self.subtract(member, right_space));
+                }
+                self.build_pruned_union_from_members(remainders)
             }
             (_, Some(SpaceNode::Union(members))) => {
                 let members = members.to_vec();
+                let left_type = match self.context.node(left_space) {
+                    Some(SpaceNode::Type { value_type, .. }) => Some(*value_type),
+                    _ => None,
+                };
+
+                if let Some(filtered_left) = left_type.and_then(|value_type| {
+                    self.filtered_decomposed_type_union(value_type, right_space)
+                }) {
+                    return self.subtract(filtered_left, right_space);
+                }
+
                 let mut remainder = left_space;
 
                 for member in members {
@@ -1292,7 +1348,7 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                             scratch[parameter_index] = left_parameters[parameter_index];
                         }
 
-                        self.build_union(remaining_spaces)
+                        self.build_pruned_union_from_members(remaining_spaces)
                     }
                 }
             }
@@ -1477,69 +1533,147 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
             parameter_options.push(self.flatten_space(parameter));
         }
 
-        let mut current = Vec::with_capacity(parameter_options.len());
-        self.expand_flattened_product(
-            value_type,
-            extractor,
-            &parameter_options,
-            0,
-            &mut current,
-            flattened,
-        );
-    }
+        if parameter_options.is_empty() {
+            flattened.push(self.make_product_space_from_ids(value_type, extractor, Vec::new()));
+            return;
+        }
 
-    fn expand_flattened_product(
-        &mut self,
-        value_type: Type,
-        extractor: Extractor,
-        parameter_options: &[Vec<EngineSpace<O>>],
-        parameter_index: usize,
-        current: &mut Vec<EngineSpace<O>>,
-        flattened_products: &mut Vec<EngineSpace<O>>,
-    ) {
-        if parameter_index == parameter_options.len() {
-            flattened_products.push(self.make_product_space_from_ids(
+        let mut indices = vec![0; parameter_options.len()];
+        let mut current = Vec::with_capacity(parameter_options.len());
+        for options in &parameter_options {
+            debug_assert!(
+                !options.is_empty(),
+                "flattened parameter options must contain at least one space",
+            );
+            current.push(options[0]);
+        }
+
+        loop {
+            flattened.push(self.make_product_space_from_ids(
                 value_type,
                 extractor,
                 current.clone(),
             ));
-            return;
-        }
 
-        for &space in &parameter_options[parameter_index] {
-            current.push(space);
-            self.expand_flattened_product(
-                value_type,
-                extractor,
-                parameter_options,
-                parameter_index + 1,
-                current,
-                flattened_products,
-            );
-            current.pop();
+            let mut advanced = false;
+            for index in (0..parameter_options.len()).rev() {
+                let next_option = indices[index] + 1;
+                if next_option < parameter_options[index].len() {
+                    indices[index] = next_option;
+                    current[index] = parameter_options[index][next_option];
+
+                    for reset_index in index + 1..parameter_options.len() {
+                        indices[reset_index] = 0;
+                        current[reset_index] = parameter_options[reset_index][0];
+                    }
+
+                    advanced = true;
+                    break;
+                }
+            }
+
+            if !advanced {
+                break;
+            }
+        }
+    }
+
+    fn estimated_space_size(&mut self, space: EngineSpace<O>) -> usize {
+        let mut visited_types = HashSet::default();
+        self.estimated_space_size_with_visited(space, &mut visited_types)
+    }
+
+    fn estimated_space_size_with_visited(
+        &mut self,
+        space: EngineSpace<O>,
+        visited_types: &mut HashSet<Type>,
+    ) -> usize {
+        match self.context.node(space) {
+            None => 0,
+            Some(SpaceNode::Type { value_type, .. }) => {
+                let value_type = *value_type;
+                if !visited_types.insert(value_type) {
+                    return 1;
+                }
+
+                let estimate = match self.decomposition_for_type(value_type) {
+                    Decomposition::NotDecomposable => 1,
+                    Decomposition::Empty => 0,
+                    Decomposition::Parts(parts) => {
+                        let parts = parts.clone();
+                        let mut total = 0usize;
+                        for part in parts {
+                            let part_space = self.make_type_space_from_id(part, true);
+                            total = total.saturating_add(
+                                self.estimated_space_size_with_visited(part_space, visited_types),
+                            );
+                        }
+                        total
+                    }
+                };
+
+                visited_types.remove(&value_type);
+                estimate
+            }
+            Some(SpaceNode::Product { parameters, .. }) => {
+                let parameters = parameters.to_vec();
+                let mut total = 1usize;
+                for parameter in parameters {
+                    total = total.saturating_mul(
+                        self.estimated_space_size_with_visited(parameter, visited_types),
+                    );
+                }
+                total
+            }
+            Some(SpaceNode::Union(members)) => {
+                let members = members.to_vec();
+                let mut total = 0usize;
+                for member in members {
+                    total = total.saturating_add(
+                        self.estimated_space_size_with_visited(member, visited_types),
+                    );
+                }
+                total
+            }
         }
     }
 
     fn remove_subsumed_spaces(&mut self, spaces: &[EngineSpace<O>]) -> Vec<EngineSpace<O>> {
-        if spaces.len() <= 1 || spaces.len() >= SUBSUMPTION_PRUNING_LIMIT {
+        if spaces.len() <= 1 {
             return spaces.to_vec();
         }
 
-        for (candidate_index, candidate_space) in spaces.iter().enumerate() {
-            let mut remaining_spaces = Vec::with_capacity(spaces.len() - 1);
-            for (other_index, space) in spaces.iter().enumerate() {
-                if candidate_index != other_index {
-                    remaining_spaces.push(*space);
-                }
-            }
+        let sizes: Vec<_> = spaces
+            .iter()
+            .copied()
+            .map(|space| self.estimated_space_size(space))
+            .collect();
+        let mut sorted_indices: Vec<_> = (0..spaces.len()).collect();
+        sorted_indices.sort_by_key(|&index| Reverse(sizes[index]));
 
-            let remaining_union = self.build_union(remaining_spaces.iter().copied());
-            if self.is_subspace(*candidate_space, remaining_union) {
-                return remaining_spaces;
+        let mut keep = vec![false; spaces.len()];
+        let mut interesting_spaces = Vec::with_capacity(spaces.len());
+
+        for index in sorted_indices {
+            let candidate_space = spaces[index];
+            let already_covered = interesting_spaces
+                .iter()
+                .copied()
+                .any(|previous_space| self.is_subspace(candidate_space, previous_space));
+            if !already_covered {
+                keep[index] = true;
+                interesting_spaces.push(candidate_space);
             }
         }
 
-        spaces.to_vec()
+        let mut pruned_spaces = Vec::with_capacity(interesting_spaces.len());
+        for (index, space) in spaces.iter().copied().enumerate() {
+            if keep[index] {
+                pruned_spaces.push(space);
+            }
+        }
+
+        pruned_spaces
     }
 
     fn check_exhaustivity(
@@ -1727,11 +1861,9 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                     }
                 }
 
-                if self.is_decomposable(left_type) {
-                    let decomposed_union = self.decomposed_type_union(left_type);
-                    self.is_subspace(decomposed_union, right_space)
-                } else {
-                    false
+                match self.filtered_decomposed_type_union(left_type, right_space) {
+                    Some(filtered_left) => filtered_left.is_empty(),
+                    None => false,
                 }
             }
             (_, Some(SpaceNode::Union(_))) => {
