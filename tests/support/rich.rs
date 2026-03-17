@@ -20,6 +20,7 @@ pub(crate) enum RichType {
     RightDecompBool,
     NoRhdBool,
     RightDecompOption,
+    LeafSet,
     Unsat,
     Leaf(u8),
 }
@@ -51,6 +52,7 @@ impl SpaceOperations for RichOperations {
             RightDecompBool => Decomposition::parts(vec![True, False]),
             NoRhdBool => Decomposition::parts(vec![True, False]),
             RightDecompOption => Decomposition::parts(vec![SomeBool, NoneTy]),
+            LeafSet => Decomposition::parts((0..12).map(Leaf).collect()),
             _ => Decomposition::NotDecomposable,
         }
     }
@@ -68,6 +70,7 @@ impl SpaceOperations for RichOperations {
             | (False, NullableBool)
             | (SomeBool, OptionBool)
             | (NoneTy, OptionBool)
+            | (Leaf(_), LeafSet)
             | (SharedSet, LeftSet)
             | (SharedSet, RightSet) => true,
             _ => false,

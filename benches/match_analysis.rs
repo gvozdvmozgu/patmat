@@ -15,6 +15,8 @@ enum BenchType {
     Some(Box<BenchType>),
     None,
     Pair(Box<BenchType>, Box<BenchType>),
+    WideSet,
+    Wide(u8),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -36,6 +38,7 @@ impl SpaceOperations for BenchOperations {
             BenchType::Option(inner) => {
                 Decomposition::parts(vec![BenchType::Some(inner.clone()), BenchType::None])
             }
+            BenchType::WideSet => Decomposition::parts((0..32).map(BenchType::Wide).collect()),
             _ => Decomposition::NotDecomposable,
         }
     }
@@ -51,6 +54,7 @@ impl SpaceOperations for BenchOperations {
             | (BenchType::Some(left), BenchType::Option(right))
             | (BenchType::Option(left), BenchType::Option(right)) => self.is_subtype(left, right),
             (BenchType::None, BenchType::Option(_)) => true,
+            (BenchType::Wide(_), BenchType::WideSet) => true,
             (BenchType::Pair(left_a, left_b), BenchType::Pair(right_a, right_b)) => {
                 self.is_subtype(left_a, right_a) && self.is_subtype(left_b, right_b)
             }
@@ -120,6 +124,12 @@ struct BenchFixture {
     input: MatchInput<BenchType, BenchExtractor>,
 }
 
+struct SubtractFixture {
+    context: BenchContext,
+    left_space: BenchSpace,
+    right_space: BenchSpace,
+}
+
 fn type_space(context: &mut BenchContext, value_type: BenchType) -> BenchSpace {
     context.of_type(value_type)
 }
@@ -160,6 +170,14 @@ fn option_bool_case(context: &mut BenchContext, choice: u8, option_bool: &BenchT
         }
         _ => panic!("invalid option<bool> benchmark case"),
     }
+}
+
+fn option_bool_union(context: &mut BenchContext, option_bool: &BenchType) -> BenchSpace {
+    let mut members = Vec::with_capacity(3);
+    for choice in 0..3 {
+        members.push(option_bool_case(context, choice, option_bool));
+    }
+    context.union(members)
 }
 
 fn build_small_fixture() -> BenchFixture {
@@ -274,6 +292,58 @@ fn build_big_fixture() -> BenchFixture {
     BenchFixture { context, input }
 }
 
+fn build_type_minus_large_union_fixture() -> SubtractFixture {
+    let mut context = BenchContext::new();
+    let left_space = type_space(&mut context, BenchType::WideSet);
+    let mut covered_spaces = Vec::with_capacity(31);
+    for index in 0..31 {
+        covered_spaces.push(type_space(&mut context, BenchType::Wide(index)));
+    }
+    let right_space = context.union(covered_spaces);
+
+    SubtractFixture {
+        context,
+        left_space,
+        right_space,
+    }
+}
+
+fn build_flatten_product_cross_fixture() -> BenchFixture {
+    let mut context = BenchContext::new();
+    let option_bool = BenchType::Option(Box::new(BenchType::Bool));
+    let left_pair = pair_type(option_bool.clone(), option_bool.clone());
+    let right_pair = pair_type(option_bool.clone(), option_bool.clone());
+    let scrutinee_type = pair_type(left_pair.clone(), right_pair.clone());
+    let left_first = option_bool_union(&mut context, &option_bool);
+    let left_second = option_bool_union(&mut context, &option_bool);
+    let right_first = option_bool_union(&mut context, &option_bool);
+    let right_second = option_bool_union(&mut context, &option_bool);
+
+    let left_space = product_space(
+        &mut context,
+        left_pair,
+        BenchExtractor::Pair,
+        vec![left_first, left_second],
+    );
+    let right_space = product_space(
+        &mut context,
+        right_pair,
+        BenchExtractor::Pair,
+        vec![right_first, right_second],
+    );
+    let scrutinee_space = product_space(
+        &mut context,
+        scrutinee_type,
+        BenchExtractor::Pair,
+        vec![left_space, right_space],
+    );
+
+    BenchFixture {
+        context,
+        input: MatchInput::new(scrutinee_space, vec![]),
+    }
+}
+
 fn bench_match_analysis(c: &mut Criterion) {
     let mut group = c.benchmark_group("match_analysis");
     let mut fixtures = [
@@ -306,6 +376,30 @@ fn bench_match_analysis(c: &mut Criterion) {
             b.iter(|| black_box(engine.analyze_match(&fixture.input)));
         });
     }
+
+    let mut subtract_fixture = build_type_minus_large_union_fixture();
+    group.bench_function(
+        BenchmarkId::new("subtract_hot_cache", "type_minus_large_union"),
+        |b| {
+            let mut engine = SpaceEngine::new(BenchOperations, &mut subtract_fixture.context);
+            let _ = engine.subtract(subtract_fixture.left_space, subtract_fixture.right_space);
+            b.iter(|| {
+                black_box(
+                    engine.subtract(subtract_fixture.left_space, subtract_fixture.right_space),
+                )
+            });
+        },
+    );
+
+    let mut flatten_fixture = build_flatten_product_cross_fixture();
+    group.bench_function(
+        BenchmarkId::new("engine_hot_cache", "flatten_product_cross"),
+        |b| {
+            let mut engine = SpaceEngine::new(BenchOperations, &mut flatten_fixture.context);
+            let _ = engine.analyze_match(&flatten_fixture.input);
+            b.iter(|| black_box(engine.analyze_match(&flatten_fixture.input)));
+        },
+    );
 
     group.finish();
 }
