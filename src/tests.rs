@@ -147,3 +147,16 @@ fn estimated_space_size_covers_empty_recursive_and_union_cases() {
     assert_eq!(engine.estimated_space_size(recursive_space), 1);
     assert_eq!(engine.estimated_space_size(union_space), 2);
 }
+
+#[test]
+fn subtract_uses_filtered_empty_type_decomposition() {
+    let mut context: SpaceContext<TestType, TestExtractor> = SpaceContext::new();
+    let never_space = context.of_type(TestType::Never);
+    let true_space = context.of_type(TestType::True);
+    let false_space = context.of_type(TestType::False);
+    let covered_union = context.union([true_space, false_space]);
+    let mut engine = SpaceEngine::new(TestOperations, &mut context);
+
+    assert!(engine.subtract(never_space, covered_union).is_empty());
+    assert!(engine.is_subspace(never_space, covered_union));
+}
