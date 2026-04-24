@@ -138,7 +138,7 @@ impl<T, E> PartialEq for Space<T, E> {
 
 impl<T, E> Eq for Space<T, E> {}
 
-impl<T: Hash, E: Hash> Hash for Space<T, E> {
+impl<T, E> Hash for Space<T, E> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.id.hash(state);
     }
@@ -890,6 +890,68 @@ where
     O: SpaceOperations,
     TI: SpaceInterner<Item = O::Type>,
 {
+    #[inline]
+    fn subspace_result(&self, left: EngineSpace<O>, right: EngineSpace<O>) -> Option<bool> {
+        self.subspace_results
+            .get(&space_pair_key(left, right))
+            .copied()
+    }
+
+    #[inline]
+    fn insert_subspace_result(
+        &mut self,
+        left: EngineSpace<O>,
+        right: EngineSpace<O>,
+        result: bool,
+    ) {
+        self.subspace_results
+            .insert(space_pair_key(left, right), result);
+    }
+
+    #[inline]
+    fn intersection_result(
+        &self,
+        left: EngineSpace<O>,
+        right: EngineSpace<O>,
+    ) -> Option<EngineSpace<O>> {
+        self.intersection_results
+            .get(&space_pair_key(left, right))
+            .copied()
+    }
+
+    #[inline]
+    fn insert_intersection_result(
+        &mut self,
+        left: EngineSpace<O>,
+        right: EngineSpace<O>,
+        result: EngineSpace<O>,
+    ) {
+        self.intersection_results
+            .insert(space_pair_key(left, right), result);
+    }
+
+    #[inline]
+    fn subtraction_result(
+        &self,
+        left: EngineSpace<O>,
+        right: EngineSpace<O>,
+    ) -> Option<EngineSpace<O>> {
+        self.subtraction_results
+            .get(&space_pair_key(left, right))
+            .copied()
+    }
+
+    #[inline]
+    fn insert_subtraction_result(
+        &mut self,
+        left: EngineSpace<O>,
+        right: EngineSpace<O>,
+        result: EngineSpace<O>,
+    ) {
+        self.subtraction_results
+            .insert(space_pair_key(left, right), result);
+    }
+
     fn clear(&mut self) {
         self.simplified_spaces.clear();
         self.subspace_results.clear();
@@ -934,6 +996,17 @@ where
     /// Clears all memoized simplification, subspace, and decomposition results.
     pub fn clear_caches(&mut self) {
         self.caches.clear();
+    }
+
+    #[inline]
+    fn assert_known_space(&self, space: EngineSpace<O>) {
+        let _ = self.context.node(space);
+    }
+
+    #[inline]
+    fn assert_known_spaces(&self, left: EngineSpace<O>, right: EngineSpace<O>) {
+        self.assert_known_space(left);
+        self.assert_known_space(right);
     }
 
     #[inline]
@@ -1271,13 +1344,13 @@ where
             return false;
         }
 
-        let cache_key = space_pair_key(left_space, right_space);
-        if let Some(&cached_result) = self.caches.subspace_results.get(&cache_key) {
+        if let Some(cached_result) = self.caches.subspace_result(left_space, right_space) {
             return cached_result;
         }
 
         let result = self.compute_subspace_relation(left_space, right_space);
-        self.caches.subspace_results.insert(cache_key, result);
+        self.caches
+            .insert_subspace_result(left_space, right_space, result);
         result
     }
 
@@ -1289,26 +1362,44 @@ where
         right_space: EngineSpace<O>,
     ) -> EngineSpace<O> {
         if left_space.is_empty() || right_space.is_empty() {
-            let _ = self.context.node(left_space);
-            let _ = self.context.node(right_space);
+            self.assert_known_spaces(left_space, right_space);
             return self.empty_space();
         }
 
         if left_space == right_space {
-            let _ = self.context.node(left_space);
+            self.assert_known_space(left_space);
             return left_space;
         }
 
-        let cache_key = space_pair_key(left_space, right_space);
-        if let Some(&cached_intersection) = self.caches.intersection_results.get(&cache_key) {
+        if let Some(cached_intersection) = self.caches.intersection_result(left_space, right_space)
+        {
             return cached_intersection;
         }
 
         let intersection = self.compute_intersection(left_space, right_space);
         self.caches
-            .intersection_results
-            .insert(cache_key, intersection);
+            .insert_intersection_result(left_space, right_space, intersection);
         intersection
+    }
+
+    fn intersect_product_parameters(
+        &mut self,
+        value_type_key: TypeKey<TI>,
+        extractor: ExtractorKey<EI>,
+        left_parameters: Vec<EngineSpace<O>>,
+        right_parameters: Vec<EngineSpace<O>>,
+    ) -> EngineSpace<O> {
+        let mut intersected_parameters = Vec::with_capacity(left_parameters.len());
+
+        for (left_parameter, right_parameter) in left_parameters.into_iter().zip(right_parameters) {
+            let parameter = self.intersect_simplified(left_parameter, right_parameter);
+            if parameter.is_empty() {
+                return self.empty_space();
+            }
+            intersected_parameters.push(parameter);
+        }
+
+        self.make_product_space_from_keys(value_type_key, extractor, intersected_parameters)
     }
 
     #[inline(always)]
@@ -1423,23 +1514,11 @@ where
                 } else {
                     let left_parameters = left_parameters.to_vec();
                     let right_parameters = right_parameters.to_vec();
-                    let mut intersected_parameters = Vec::with_capacity(left_parameters.len());
-
-                    for (left_parameter, right_parameter) in
-                        left_parameters.into_iter().zip(right_parameters)
-                    {
-                        let intersection = self.intersect(left_parameter, right_parameter);
-                        let parameter = self.simplify(intersection);
-                        if parameter.is_empty() {
-                            return self.empty_space();
-                        }
-                        intersected_parameters.push(parameter);
-                    }
-
-                    self.make_product_space_from_keys(
+                    self.intersect_product_parameters(
                         value_type_key,
                         extractor,
-                        intersected_parameters,
+                        left_parameters,
+                        right_parameters,
                     )
                 }
             }
@@ -1454,28 +1533,89 @@ where
         right_space: EngineSpace<O>,
     ) -> EngineSpace<O> {
         if left_space.is_empty() {
-            let _ = self.context.node(right_space);
+            self.assert_known_space(right_space);
             return self.empty_space();
         }
 
         if right_space.is_empty() {
-            let _ = self.context.node(left_space);
+            self.assert_known_space(left_space);
             return left_space;
         }
 
         if left_space == right_space {
-            let _ = self.context.node(left_space);
+            self.assert_known_space(left_space);
             return self.empty_space();
         }
 
-        let cache_key = space_pair_key(left_space, right_space);
-        if let Some(&cached_remainder) = self.caches.subtraction_results.get(&cache_key) {
+        if let Some(cached_remainder) = self.caches.subtraction_result(left_space, right_space) {
             return cached_remainder;
         }
 
         let remainder = self.compute_subtraction(left_space, right_space);
-        self.caches.subtraction_results.insert(cache_key, remainder);
+        self.caches
+            .insert_subtraction_result(left_space, right_space, remainder);
         remainder
+    }
+
+    fn subtract_product_parameters(
+        &mut self,
+        left_space: EngineSpace<O>,
+        value_type_key: TypeKey<TI>,
+        extractor: ExtractorKey<EI>,
+        left_parameters: Vec<EngineSpace<O>>,
+        right_parameters: Vec<EngineSpace<O>>,
+    ) -> EngineSpace<O> {
+        let mut parameter_remainders = Vec::with_capacity(left_parameters.len());
+        for (left_parameter, right_parameter) in left_parameters
+            .iter()
+            .copied()
+            .zip(right_parameters.iter().copied())
+        {
+            let remainder = self.subtract_simplified(left_parameter, right_parameter);
+            parameter_remainders.push(remainder);
+        }
+
+        if left_parameters
+            .iter()
+            .copied()
+            .zip(parameter_remainders.iter().copied())
+            .any(|(left_parameter, parameter_remainder)| {
+                self.is_subspace(left_parameter, parameter_remainder)
+            })
+        {
+            return left_space;
+        }
+
+        if parameter_remainders.iter().all(|space| space.is_empty()) {
+            return self.empty_space();
+        }
+
+        let mut flattened_remainders = Vec::with_capacity(parameter_remainders.len());
+        let mut total_remaining_spaces = 0usize;
+
+        for remainder in parameter_remainders.iter().copied() {
+            let flattened = self.flatten_space(remainder);
+            total_remaining_spaces += flattened.len();
+            flattened_remainders.push(flattened);
+        }
+
+        let mut remaining_spaces = Vec::with_capacity(total_remaining_spaces);
+        let mut current_parameters = left_parameters.clone();
+
+        for (parameter_index, flattened_spaces) in flattened_remainders.iter().enumerate() {
+            for &flattened_space in flattened_spaces {
+                current_parameters[parameter_index] = flattened_space;
+                remaining_spaces.push(self.make_product_space_from_keys(
+                    value_type_key.clone(),
+                    extractor.clone(),
+                    current_parameters.clone(),
+                ));
+            }
+
+            current_parameters[parameter_index] = left_parameters[parameter_index];
+        }
+
+        self.build_pruned_union_from_members(remaining_spaces)
     }
 
     #[inline(always)]
@@ -1627,60 +1767,13 @@ where
                 } else {
                     let left_parameters = left_parameters.to_vec();
                     let right_parameters = right_parameters.to_vec();
-
-                    let mut parameter_remainders = Vec::with_capacity(left_parameters.len());
-                    for (left_parameter, right_parameter) in left_parameters
-                        .iter()
-                        .copied()
-                        .zip(right_parameters.iter().copied())
-                    {
-                        let subtraction = self.subtract(left_parameter, right_parameter);
-                        let remainder = self.simplify(subtraction);
-                        parameter_remainders.push(remainder);
-                    }
-
-                    if left_parameters
-                        .iter()
-                        .copied()
-                        .zip(parameter_remainders.iter().copied())
-                        .any(|(left_parameter, parameter_remainder)| {
-                            self.is_subspace(left_parameter, parameter_remainder)
-                        })
-                    {
-                        left_space
-                    } else if parameter_remainders.iter().all(|space| space.is_empty()) {
-                        self.empty_space()
-                    } else {
-                        let mut flattened_remainders =
-                            Vec::with_capacity(parameter_remainders.len());
-                        let mut total_remaining_spaces = 0usize;
-
-                        for remainder in parameter_remainders.iter().copied() {
-                            let flattened = self.flatten_space(remainder);
-                            total_remaining_spaces += flattened.len();
-                            flattened_remainders.push(flattened);
-                        }
-
-                        let mut remaining_spaces = Vec::with_capacity(total_remaining_spaces);
-                        let mut scratch = left_parameters.clone();
-
-                        for (parameter_index, flattened_spaces) in
-                            flattened_remainders.iter().enumerate()
-                        {
-                            for &flattened_space in flattened_spaces {
-                                scratch[parameter_index] = flattened_space;
-                                remaining_spaces.push(self.make_product_space_from_keys(
-                                    value_type_key.clone(),
-                                    extractor.clone(),
-                                    scratch.clone(),
-                                ));
-                            }
-
-                            scratch[parameter_index] = left_parameters[parameter_index];
-                        }
-
-                        self.build_pruned_union_from_members(remaining_spaces)
-                    }
+                    self.subtract_product_parameters(
+                        left_space,
+                        value_type_key,
+                        extractor,
+                        left_parameters,
+                        right_parameters,
+                    )
                 }
             }
         }
@@ -1883,43 +1976,50 @@ where
             return;
         }
 
-        let mut indices = vec![0; parameter_options.len()];
-        let mut current = Vec::with_capacity(parameter_options.len());
-        for options in &parameter_options {
-            debug_assert!(
-                !options.is_empty(),
-                "flattened parameter options must contain at least one space",
-            );
-            current.push(options[0]);
-        }
+        let mut current_parameters = Vec::with_capacity(parameter_options.len());
+        self.push_flattened_product_combinations(
+            &value_type_key,
+            &extractor,
+            &parameter_options,
+            &mut current_parameters,
+            flattened,
+        );
+    }
 
-        loop {
+    fn push_flattened_product_combinations(
+        &mut self,
+        value_type_key: &TypeKey<TI>,
+        extractor: &ExtractorKey<EI>,
+        parameter_options: &[Vec<EngineSpace<O>>],
+        current_parameters: &mut Vec<EngineSpace<O>>,
+        flattened: &mut Vec<EngineSpace<O>>,
+    ) {
+        let parameter_index = current_parameters.len();
+        if parameter_index == parameter_options.len() {
             flattened.push(self.make_product_space_from_keys(
                 value_type_key.clone(),
                 extractor.clone(),
-                current.clone(),
+                current_parameters.clone(),
             ));
+            return;
+        }
 
-            let mut advanced = false;
-            for index in (0..parameter_options.len()).rev() {
-                let next_option = indices[index] + 1;
-                if next_option < parameter_options[index].len() {
-                    indices[index] = next_option;
-                    current[index] = parameter_options[index][next_option];
+        let options = &parameter_options[parameter_index];
+        assert!(
+            !options.is_empty(),
+            "flattened parameter options must contain at least one space",
+        );
 
-                    for reset_index in index + 1..parameter_options.len() {
-                        indices[reset_index] = 0;
-                        current[reset_index] = parameter_options[reset_index][0];
-                    }
-
-                    advanced = true;
-                    break;
-                }
-            }
-
-            if !advanced {
-                break;
-            }
+        for &option in options {
+            current_parameters.push(option);
+            self.push_flattened_product_combinations(
+                value_type_key,
+                extractor,
+                parameter_options,
+                current_parameters,
+                flattened,
+            );
+            current_parameters.pop();
         }
     }
 
