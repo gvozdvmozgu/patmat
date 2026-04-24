@@ -1,7 +1,7 @@
 use super::{
     AtomicIntersection, Decomposition, DedupInterner, IdentityInterner, MatchArm, MatchInput,
-    PreInternedSpaceContext, Space, SpaceContext, SpaceEngine, SpaceKind, SpaceLookupError,
-    SpaceOperations, check_match,
+    PreInternedSpaceContext, Space, SpaceContext, SpaceEngine, SpaceInterner, SpaceKind,
+    SpaceLookupError, SpaceOperations, check_match,
 };
 use std::marker::PhantomData;
 
@@ -198,6 +198,25 @@ fn check_match_accepts_borrowed_operations() {
 }
 
 #[test]
+fn interners_expose_dedup_and_identity_behaviour() {
+    let mut dedup = DedupInterner::<IdType>::default();
+    let first = dedup.intern(IdType(1));
+    let duplicate = dedup.intern(IdType(1));
+    let second = dedup.intern(IdType(2));
+
+    assert_eq!(first, duplicate);
+    assert_ne!(first, second);
+    assert_eq!(dedup.get(&first), &IdType(1));
+    assert_eq!(dedup.get(&second), &IdType(2));
+
+    let mut identity = IdentityInterner::<IdType>::default();
+    let key = identity.intern(IdType(7));
+
+    assert_eq!(key, IdType(7));
+    assert_eq!(identity.get(&key), IdType(7));
+}
+
+#[test]
 fn preinterned_context_uses_identity_keys_without_value_tables() {
     let mut context: PreInternedSpaceContext<IdType, IdExtractor> = PreInternedSpaceContext::new();
 
@@ -227,6 +246,39 @@ fn preinterned_context_uses_identity_keys_without_value_tables() {
 }
 
 #[test]
+fn preinterned_context_resolves_empty_type_and_union_views() {
+    let mut context: PreInternedSpaceContext<IdType, IdExtractor> = PreInternedSpaceContext::new();
+
+    let empty = context.empty();
+    let whole = context.of_type(IdType(0));
+    let leaf = context.atomic_type(IdType(1));
+    let union = context.union([whole, leaf]);
+
+    assert_eq!(context.kind(empty), SpaceKind::Empty);
+
+    match whole.kind(&context) {
+        SpaceKind::Type(kind) => {
+            assert_eq!(kind.value_type, IdType(0));
+            assert!(kind.introduced_by_decomposition);
+        }
+        other => panic!("expected pre-interned type space, got {:?}", other),
+    }
+
+    match leaf.kind(&context) {
+        SpaceKind::Type(kind) => {
+            assert_eq!(kind.value_type, IdType(1));
+            assert!(!kind.introduced_by_decomposition);
+        }
+        other => panic!("expected pre-interned atomic type space, got {:?}", other),
+    }
+
+    match union.kind(&context) {
+        SpaceKind::Union(members) => assert_eq!(members, &[whole, leaf]),
+        other => panic!("expected pre-interned union space, got {:?}", other),
+    }
+}
+
+#[test]
 fn context_accepts_mixed_explicit_interners() {
     let mut context: SpaceContext<
         IdType,
@@ -249,6 +301,18 @@ fn context_accepts_mixed_explicit_interners() {
             other
         ),
     }
+}
+
+#[test]
+fn subtract_type_from_uncovered_product_keeps_preinterned_type_space() {
+    let mut context: PreInternedSpaceContext<IdType, IdExtractor> = PreInternedSpaceContext::new();
+    let scrutinee = context.of_type(IdType(4));
+    let parameter = context.of_type(IdType(1));
+    let uncovered_product = context.product(IdType(4), IdExtractor(8), vec![parameter]);
+    let mut engine = SpaceEngine::new(IdOperations, &mut context);
+
+    assert_eq!(engine.subtract(scrutinee, uncovered_product), scrutinee);
+    assert!(!engine.is_subspace(scrutinee, uncovered_product));
 }
 
 #[test]
