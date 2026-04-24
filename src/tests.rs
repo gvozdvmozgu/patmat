@@ -3,7 +3,6 @@ use super::{
     PreInternedSpaceContext, Space, SpaceContext, SpaceEngine, SpaceInterner, SpaceKind,
     SpaceLookupError, SpaceOperations, check_match,
 };
-use std::marker::PhantomData;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum TestType {
@@ -163,10 +162,7 @@ fn engine_uses_context_backed_space_ids() {
 #[test]
 fn try_kind_reports_unknown_non_empty_space_ids() {
     let context: SpaceContext<TestType, TestExtractor> = SpaceContext::new();
-    let unknown_space = Space {
-        id: 1,
-        _marker: PhantomData,
-    };
+    let unknown_space = Space::from_raw_id_for_tests(1);
 
     assert_eq!(context.try_kind(context.empty()), Ok(SpaceKind::Empty));
     assert_eq!(context.try_kind(unknown_space), Err(SpaceLookupError));
@@ -176,10 +172,7 @@ fn try_kind_reports_unknown_non_empty_space_ids() {
 #[should_panic(expected = "space id must reference a node in this context")]
 fn kind_panics_on_unknown_non_empty_space() {
     let context: SpaceContext<TestType, TestExtractor> = SpaceContext::new();
-    let unknown_space = Space {
-        id: 1,
-        _marker: PhantomData,
-    };
+    let unknown_space = Space::from_raw_id_for_tests(1);
 
     let _ = context.kind(unknown_space);
 }
