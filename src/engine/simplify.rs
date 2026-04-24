@@ -1,6 +1,6 @@
-use crate::{SpaceInterner, SpaceOperations, space::SpaceNode};
+use crate::{SpaceInterner, SpaceOperations};
 
-use super::{EngineSpace, SpaceEngine};
+use super::{EngineSpace, NodeSnapshot, SpaceEngine};
 
 impl<'a, O, TI, EI> SpaceEngine<'a, O, TI, EI>
 where
@@ -14,24 +14,23 @@ where
             return cached_space;
         }
 
-        let simplified_space = match self.context.node(space) {
-            None => self.empty_space(),
-            Some(SpaceNode::Type { value_type, .. }) => {
-                let value_type_key = value_type.clone();
+        let simplified_space = match self.node_snapshot(space) {
+            NodeSnapshot::Empty => self.empty_space(),
+            NodeSnapshot::Type { value_type, .. } => {
+                let value_type_key = value_type;
                 if self.type_key_is_uninhabited(value_type_key) {
                     self.empty_space()
                 } else {
                     space
                 }
             }
-            Some(SpaceNode::Product {
+            NodeSnapshot::Product {
                 value_type,
                 extractor,
                 parameters,
-            }) => {
-                let value_type_key = value_type.clone();
-                let extractor = extractor.clone();
-                let parameters = Self::snapshot_spaces(parameters);
+            } => {
+                let value_type_key = value_type;
+                let parameters = parameters.to_vec();
                 if self.type_key_is_uninhabited(value_type_key.clone()) {
                     self.empty_space()
                 } else {
@@ -62,8 +61,8 @@ where
                     }
                 }
             }
-            Some(SpaceNode::Union(members)) => {
-                let members = Self::snapshot_spaces(members);
+            NodeSnapshot::Union(members) => {
+                let members = members.to_vec();
                 let mut simplified_members = Vec::with_capacity(members.len());
                 let mut changed = false;
 

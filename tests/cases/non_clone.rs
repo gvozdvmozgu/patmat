@@ -33,28 +33,18 @@ impl SpaceOperations for NonCloneOperations {
         left == right
     }
 
-    fn extractor_parameter_types(
+    fn covering_extractor_parameter_types(
         &self,
         extractor: &Self::Extractor,
         scrutinee_type: &Self::Type,
         arity: usize,
-    ) -> Vec<Self::Type> {
+    ) -> Option<Vec<Self::Type>> {
         match (extractor, scrutinee_type, arity) {
-            (NonCloneExtractor::Wrap, NonCloneType::WrappedTrue, 1) => vec![NonCloneType::True],
-            _ => Vec::new(),
+            (NonCloneExtractor::Wrap, NonCloneType::WrappedTrue, 1) => {
+                Some(vec![NonCloneType::True])
+            }
+            _ => None,
         }
-    }
-
-    fn extractor_covers_type(
-        &self,
-        extractor: &Self::Extractor,
-        scrutinee_type: &Self::Type,
-        arity: usize,
-    ) -> bool {
-        matches!(
-            (extractor, scrutinee_type, arity),
-            (NonCloneExtractor::Wrap, NonCloneType::WrappedTrue, 1)
-        )
     }
 
     fn intersect_atomic_types(

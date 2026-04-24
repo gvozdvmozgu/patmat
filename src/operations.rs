@@ -60,23 +60,18 @@ pub trait SpaceOperations {
     /// Returns `true` when two extractors can be treated as equivalent.
     fn extractors_are_equivalent(&self, left: &Self::Extractor, right: &Self::Extractor) -> bool;
 
-    /// Returns the parameter types produced by an extractor for a scrutinee type.
+    /// Returns the parameter types produced by a covering extractor.
     ///
-    /// Implementations must return exactly `arity` parameter types.
-    fn extractor_parameter_types(
+    /// Implementations must return `Some` with exactly `arity` parameter types
+    /// when every value of `scrutinee_type` matches the extractor. Return
+    /// `None` when the extractor does not cover that scrutinee type at the
+    /// given arity.
+    fn covering_extractor_parameter_types(
         &self,
         extractor: &Self::Extractor,
         scrutinee_type: &Self::Type,
         arity: usize,
-    ) -> Vec<Self::Type>;
-
-    /// Returns `true` when every value of the scrutinee type matches the extractor.
-    fn extractor_covers_type(
-        &self,
-        extractor: &Self::Extractor,
-        scrutinee_type: &Self::Type,
-        arity: usize,
-    ) -> bool;
+    ) -> Option<Vec<Self::Type>>;
 
     /// Intersects two unrelated atomic types.
     fn intersect_atomic_types(
@@ -120,22 +115,13 @@ impl<O: SpaceOperations + ?Sized> SpaceOperations for &O {
         (**self).extractors_are_equivalent(left, right)
     }
 
-    fn extractor_parameter_types(
+    fn covering_extractor_parameter_types(
         &self,
         extractor: &Self::Extractor,
         scrutinee_type: &Self::Type,
         arity: usize,
-    ) -> Vec<Self::Type> {
-        (**self).extractor_parameter_types(extractor, scrutinee_type, arity)
-    }
-
-    fn extractor_covers_type(
-        &self,
-        extractor: &Self::Extractor,
-        scrutinee_type: &Self::Type,
-        arity: usize,
-    ) -> bool {
-        (**self).extractor_covers_type(extractor, scrutinee_type, arity)
+    ) -> Option<Vec<Self::Type>> {
+        (**self).covering_extractor_parameter_types(extractor, scrutinee_type, arity)
     }
 
     fn intersect_atomic_types(

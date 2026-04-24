@@ -39,8 +39,7 @@ the `SpaceOperations` trait, which supplies:
 - subtype checks
 - type decomposition
 - extractor equivalence
-- extractor parameter typing
-- irrefutability checks
+- covering extractor parameter typing
 - atomic type intersections
 - optional satisfiability filtering for advanced type systems
 

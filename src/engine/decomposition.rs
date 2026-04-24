@@ -1,9 +1,6 @@
-use crate::{
-    AtomicIntersection, Decomposition, SpaceInterner, SpaceOperations,
-    space::{SpaceNode, TypeKey},
-};
+use crate::{AtomicIntersection, Decomposition, SpaceInterner, SpaceOperations, space::TypeKey};
 
-use super::{EngineSpace, SpaceEngine};
+use super::{EngineSpace, NodeSnapshot, SpaceEngine};
 
 impl<'a, O, TI, EI> SpaceEngine<'a, O, TI, EI>
 where
@@ -97,22 +94,22 @@ where
             AtomicIntersection::Empty => self.empty_space(),
             AtomicIntersection::Type(intersection_type) => {
                 let intersection_type = self.context.intern_type_value(intersection_type);
-                match self.context.node(preferred_space) {
-                    Some(SpaceNode::Type {
+                match self.node_snapshot(preferred_space) {
+                    NodeSnapshot::Type {
                         introduced_by_decomposition,
                         ..
-                    }) => self
-                        .make_type_space_from_key(intersection_type, *introduced_by_decomposition),
-                    Some(SpaceNode::Product {
+                    } => self
+                        .make_type_space_from_key(intersection_type, introduced_by_decomposition),
+                    NodeSnapshot::Product {
                         extractor,
                         parameters,
                         ..
-                    }) => {
-                        let extractor = extractor.clone();
-                        let parameters = Self::snapshot_spaces(parameters);
-                        self.make_product_space_from_keys(intersection_type, extractor, parameters)
-                    }
-                    None | Some(SpaceNode::Union(_)) => {
+                    } => self.make_product_space_from_keys(
+                        intersection_type,
+                        extractor,
+                        parameters.to_vec(),
+                    ),
+                    NodeSnapshot::Empty | NodeSnapshot::Union(_) => {
                         unreachable!("atomic intersections only apply to atomic spaces")
                     }
                 }

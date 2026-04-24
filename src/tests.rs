@@ -38,22 +38,13 @@ impl SpaceOperations for TestOperations {
         left == right
     }
 
-    fn extractor_parameter_types(
+    fn covering_extractor_parameter_types(
         &self,
         _extractor: &Self::Extractor,
         _scrutinee_type: &Self::Type,
         _arity: usize,
-    ) -> Vec<Self::Type> {
-        Vec::new()
-    }
-
-    fn extractor_covers_type(
-        &self,
-        _extractor: &Self::Extractor,
-        _scrutinee_type: &Self::Type,
-        _arity: usize,
-    ) -> bool {
-        false
+    ) -> Option<Vec<Self::Type>> {
+        None
     }
 
     fn intersect_atomic_types(
@@ -97,28 +88,16 @@ impl SpaceOperations for IdOperations {
         left == right
     }
 
-    fn extractor_parameter_types(
+    fn covering_extractor_parameter_types(
         &self,
         extractor: &Self::Extractor,
         scrutinee_type: &Self::Type,
         arity: usize,
-    ) -> Vec<Self::Type> {
+    ) -> Option<Vec<Self::Type>> {
         match (*extractor, *scrutinee_type, arity) {
-            (IdExtractor(7), IdType(3), 1) => vec![IdType(0)],
-            _ => Vec::new(),
+            (IdExtractor(7), IdType(3), 1) => Some(vec![IdType(0)]),
+            _ => None,
         }
-    }
-
-    fn extractor_covers_type(
-        &self,
-        extractor: &Self::Extractor,
-        scrutinee_type: &Self::Type,
-        arity: usize,
-    ) -> bool {
-        matches!(
-            (*extractor, *scrutinee_type, arity),
-            (IdExtractor(7), IdType(3), 1)
-        )
     }
 
     fn intersect_atomic_types(

@@ -3,6 +3,7 @@ mod decomposition;
 mod flattening;
 mod intersection;
 mod match_analysis;
+mod pruning;
 mod simplify;
 mod subspace;
 mod subtraction;
@@ -16,6 +17,56 @@ use crate::{
     SpaceOperations,
     space::{ExtractorKey, TypeKey},
 };
+
+enum NodeSnapshot<S, TK, EK> {
+    Empty,
+    Type {
+        value_type: TK,
+        introduced_by_decomposition: bool,
+    },
+    Product {
+        value_type: TK,
+        extractor: EK,
+        parameters: SpaceHandles<S>,
+    },
+    Union(SpaceHandles<S>),
+}
+
+enum SpaceHandles<S> {
+    Empty,
+    One(S),
+    Two([S; 2]),
+    Many(Vec<S>),
+}
+
+impl<S: Copy> SpaceHandles<S> {
+    fn from_slice(spaces: &[S]) -> Self {
+        match spaces {
+            [] => Self::Empty,
+            [space] => Self::One(*space),
+            [left, right] => Self::Two([*left, *right]),
+            many => Self::Many(many.to_vec()),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Empty => 0,
+            Self::One(_) => 1,
+            Self::Two(_) => 2,
+            Self::Many(spaces) => spaces.len(),
+        }
+    }
+
+    fn to_vec(&self) -> Vec<S> {
+        match self {
+            Self::Empty => Vec::new(),
+            Self::One(space) => vec![*space],
+            Self::Two(spaces) => spaces.to_vec(),
+            Self::Many(spaces) => spaces.clone(),
+        }
+    }
+}
 
 /// Stateful engine for space algebra operations.
 pub struct SpaceEngine<
@@ -51,6 +102,7 @@ where
 type EngineSpace<O> = Space<<O as SpaceOperations>::Type, <O as SpaceOperations>::Extractor>;
 type EngineContext<O, TI, EI> =
     SpaceContext<<O as SpaceOperations>::Type, <O as SpaceOperations>::Extractor, TI, EI>;
+type EngineNodeSnapshot<O, TI, EI> = NodeSnapshot<EngineSpace<O>, TypeKey<TI>, ExtractorKey<EI>>;
 
 impl<'a, O, TI, EI> SpaceEngine<'a, O, TI, EI>
 where
@@ -141,28 +193,15 @@ where
     }
 
     #[inline]
-    fn extractor_covers_type_key(
+    fn covering_extractor_parameter_types_key(
         &self,
         extractor: &ExtractorKey<EI>,
         scrutinee_type: &TypeKey<TI>,
         arity: usize,
-    ) -> bool {
+    ) -> Option<Vec<O::Type>> {
         let extractor = self.extractor_ref(extractor);
         let scrutinee_type = self.type_ref(scrutinee_type);
-        self.operations
-            .extractor_covers_type(extractor.borrow(), scrutinee_type.borrow(), arity)
-    }
-
-    #[inline]
-    fn extractor_parameter_types_key(
-        &self,
-        extractor: &ExtractorKey<EI>,
-        scrutinee_type: &TypeKey<TI>,
-        arity: usize,
-    ) -> Vec<O::Type> {
-        let extractor = self.extractor_ref(extractor);
-        let scrutinee_type = self.type_ref(scrutinee_type);
-        self.operations.extractor_parameter_types(
+        self.operations.covering_extractor_parameter_types(
             extractor.borrow(),
             scrutinee_type.borrow(),
             arity,
@@ -233,8 +272,33 @@ where
     }
 
     #[inline]
-    fn snapshot_spaces(spaces: &[EngineSpace<O>]) -> Vec<EngineSpace<O>> {
+    fn copy_space_handles(spaces: &[EngineSpace<O>]) -> Vec<EngineSpace<O>> {
         spaces.to_vec()
+    }
+
+    fn node_snapshot(&self, space: EngineSpace<O>) -> EngineNodeSnapshot<O, TI, EI> {
+        match self.context.node(space) {
+            None => NodeSnapshot::Empty,
+            Some(crate::space::SpaceNode::Type {
+                value_type,
+                introduced_by_decomposition,
+            }) => NodeSnapshot::Type {
+                value_type: value_type.clone(),
+                introduced_by_decomposition: *introduced_by_decomposition,
+            },
+            Some(crate::space::SpaceNode::Product {
+                value_type,
+                extractor,
+                parameters,
+            }) => NodeSnapshot::Product {
+                value_type: value_type.clone(),
+                extractor: extractor.clone(),
+                parameters: SpaceHandles::from_slice(parameters),
+            },
+            Some(crate::space::SpaceNode::Union(members)) => {
+                NodeSnapshot::Union(SpaceHandles::from_slice(members))
+            }
+        }
     }
 
     fn map_union_members(
@@ -304,17 +368,13 @@ where
             return None;
         }
 
-        if !self.extractor_covers_type_key(&extractor, &scrutinee_type, arity) {
-            return None;
-        }
-
         let parameter_types =
-            self.extractor_parameter_types_key(&extractor, &scrutinee_type, arity);
+            self.covering_extractor_parameter_types_key(&extractor, &scrutinee_type, arity)?;
 
         debug_assert_eq!(
             parameter_types.len(),
             arity,
-            "extractor_parameter_types must return exactly `arity` parameter types",
+            "covering_extractor_parameter_types must return exactly `arity` parameter types",
         );
 
         let mut lifted_parameters = Vec::with_capacity(parameter_types.len());

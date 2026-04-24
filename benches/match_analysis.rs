@@ -66,33 +66,19 @@ impl SpaceOperations for BenchOperations {
         left == right
     }
 
-    fn extractor_parameter_types(
+    fn covering_extractor_parameter_types(
         &self,
         extractor: &Self::Extractor,
         scrutinee_type: &Self::Type,
         arity: usize,
-    ) -> Vec<Self::Type> {
+    ) -> Option<Vec<Self::Type>> {
         match (extractor, scrutinee_type, arity) {
-            (BenchExtractor::Some, BenchType::Some(inner), 1)
-            | (BenchExtractor::Some, BenchType::Option(inner), 1) => vec![(*inner.clone())],
+            (BenchExtractor::Some, BenchType::Some(inner), 1) => Some(vec![(*inner.clone())]),
             (BenchExtractor::Pair, BenchType::Pair(left, right), 2) => {
-                vec![(*left.clone()), (*right.clone())]
+                Some(vec![(*left.clone()), (*right.clone())])
             }
-            _ => Vec::new(),
+            _ => None,
         }
-    }
-
-    fn extractor_covers_type(
-        &self,
-        extractor: &Self::Extractor,
-        scrutinee_type: &Self::Type,
-        arity: usize,
-    ) -> bool {
-        matches!(
-            (extractor, scrutinee_type, arity),
-            (BenchExtractor::Some, BenchType::Some(_), 1)
-                | (BenchExtractor::Pair, BenchType::Pair(_, _), 2)
-        )
     }
 
     fn intersect_atomic_types(

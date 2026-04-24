@@ -96,25 +96,16 @@ impl SpaceOperations for RichOperations {
         )
     }
 
-    fn extractor_parameter_types(
-        &self,
-        _extractor: &Self::Extractor,
-        _scrutinee_type: &Self::Type,
-        arity: usize,
-    ) -> Vec<Self::Type> {
-        vec![RichType::Bool; arity]
-    }
-
-    fn extractor_covers_type(
+    fn covering_extractor_parameter_types(
         &self,
         extractor: &Self::Extractor,
         scrutinee_type: &Self::Type,
         arity: usize,
-    ) -> bool {
+    ) -> Option<Vec<Self::Type>> {
         use RichExtractor::*;
         use RichType::*;
 
-        matches!(
+        let covers = matches!(
             (extractor, scrutinee_type, arity),
             (Some, SomeBool, 1)
                 | (SomeAlias, SomeBool, 1)
@@ -123,7 +114,9 @@ impl SpaceOperations for RichOperations {
                 | (Other, LeftSet, 0)
                 | (Other, RightSet, 0)
                 | (Other, SharedSet, 0)
-        )
+        );
+
+        covers.then(|| vec![RichType::Bool; arity])
     }
 
     fn intersect_atomic_types(

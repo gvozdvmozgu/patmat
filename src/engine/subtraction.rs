@@ -1,9 +1,9 @@
 use crate::{
     SpaceInterner, SpaceOperations,
-    space::{ExtractorKey, SpaceNode, TypeKey},
+    space::{ExtractorKey, TypeKey},
 };
 
-use super::{EngineSpace, SpaceEngine};
+use super::{EngineSpace, NodeSnapshot, SpaceEngine};
 
 impl<'a, O, TI, EI> SpaceEngine<'a, O, TI, EI>
 where
@@ -43,7 +43,7 @@ where
         remainder
     }
 
-    fn subtract_product_parameters(
+    fn subtract_matching_products(
         &mut self,
         left_space: EngineSpace<O>,
         value_type_key: TypeKey<TI>,
@@ -214,103 +214,92 @@ where
         right_space: EngineSpace<O>,
     ) -> EngineSpace<O> {
         match (
-            self.context.node(left_space),
-            self.context.node(right_space),
+            self.node_snapshot(left_space),
+            self.node_snapshot(right_space),
         ) {
-            (None, _) => self.empty_space(),
-            (_, None) => left_space,
-            (Some(SpaceNode::Union(members)), _) => {
-                let members = Self::snapshot_spaces(members);
-                self.subtract_space_from_union_members(members, right_space)
+            (NodeSnapshot::Empty, _) => self.empty_space(),
+            (_, NodeSnapshot::Empty) => left_space,
+            (NodeSnapshot::Union(members), _) => {
+                self.subtract_space_from_union_members(members.to_vec(), right_space)
             }
-            (_, Some(SpaceNode::Union(members))) => {
-                let members = Self::snapshot_spaces(members);
-                let left_type = match self.context.node(left_space) {
-                    Some(SpaceNode::Type { value_type, .. }) => Some(value_type.clone()),
+            (left_snapshot, NodeSnapshot::Union(members)) => {
+                let left_type = match left_snapshot {
+                    NodeSnapshot::Type { value_type, .. } => Some(value_type),
                     _ => None,
                 };
-                self.subtract_union_members_from_space(left_space, right_space, left_type, members)
-            }
-            (
-                Some(SpaceNode::Type {
-                    value_type: left_type_key,
-                    ..
-                }),
-                Some(SpaceNode::Type {
-                    value_type: right_type_key,
-                    ..
-                }),
-            ) => {
-                let left_type_key = left_type_key.clone();
-                let right_type_key = right_type_key.clone();
-                self.subtract_type_from_type(left_space, left_type_key, right_space, right_type_key)
-            }
-            (
-                Some(SpaceNode::Type {
-                    value_type: left_type_key,
-                    ..
-                }),
-                Some(SpaceNode::Product {
-                    value_type: right_value_key,
-                    extractor: right_extractor,
-                    parameters: right_parameters,
-                }),
-            ) => {
-                let left_type_key = left_type_key.clone();
-                self.subtract_type_from_product(
+                self.subtract_union_members_from_space(
                     left_space,
-                    left_type_key,
                     right_space,
-                    right_value_key.clone(),
-                    right_extractor.clone(),
-                    right_parameters.len(),
+                    left_type,
+                    members.to_vec(),
                 )
             }
             (
-                Some(SpaceNode::Product {
+                NodeSnapshot::Type {
                     value_type: left_type_key,
                     ..
-                }),
-                Some(SpaceNode::Type {
+                },
+                NodeSnapshot::Type {
                     value_type: right_type_key,
                     ..
-                }),
+                },
             ) => {
-                let left_type_key = left_type_key.clone();
-                let right_type_key = right_type_key.clone();
-                self.subtract_product_from_type(left_space, left_type_key, right_type_key)
+                self.subtract_type_from_type(left_space, left_type_key, right_space, right_type_key)
             }
             (
-                Some(SpaceNode::Product {
+                NodeSnapshot::Type {
+                    value_type: left_type_key,
+                    ..
+                },
+                NodeSnapshot::Product {
+                    value_type: right_value_key,
+                    extractor: right_extractor,
+                    parameters: right_parameters,
+                },
+            ) => self.subtract_type_from_product(
+                left_space,
+                left_type_key,
+                right_space,
+                right_value_key,
+                right_extractor,
+                right_parameters.len(),
+            ),
+            (
+                NodeSnapshot::Product {
+                    value_type: left_type_key,
+                    ..
+                },
+                NodeSnapshot::Type {
+                    value_type: right_type_key,
+                    ..
+                },
+            ) => self.subtract_product_from_type(left_space, left_type_key, right_type_key),
+            (
+                NodeSnapshot::Product {
                     value_type,
                     extractor,
                     parameters: left_parameters,
-                }),
-                Some(SpaceNode::Product {
+                },
+                NodeSnapshot::Product {
                     extractor: right_extractor,
                     parameters: right_parameters,
                     ..
-                }),
+                },
             ) => {
-                let value_type_key = value_type.clone();
-                let extractor = extractor.clone();
-
                 if !self.same_product_shape(
                     &extractor,
-                    right_extractor,
+                    &right_extractor,
                     left_parameters.len(),
                     right_parameters.len(),
                 ) {
                     left_space
                 } else {
-                    let left_parameters = Self::snapshot_spaces(left_parameters);
-                    let right_parameters = Self::snapshot_spaces(right_parameters);
-                    self.subtract_product_parameters(
+                    self.subtract_matching_products(
                         left_space,
-                        value_type_key,
+                        value_type,
                         extractor,
-                        left_parameters,
-                        right_parameters,
+                        left_parameters.to_vec(),
+                        right_parameters.to_vec(),
                     )
                 }
             }
