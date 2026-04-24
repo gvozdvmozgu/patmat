@@ -219,8 +219,9 @@ enum SpaceNode<T, E, TK, EK> {
     Union(Box<[Space<T, E>]>),
 }
 
-type InternedSpaceNode<T, E, TI, EI> =
-    SpaceNode<T, E, <TI as SpaceInterner>::Key, <EI as SpaceInterner>::Key>;
+type TypeKey<TI> = <TI as SpaceInterner>::Key;
+type ExtractorKey<EI> = <EI as SpaceInterner>::Key;
+type InternedSpaceNode<T, E, TI, EI> = SpaceNode<T, E, TypeKey<TI>, ExtractorKey<EI>>;
 
 /// Read-only metadata for a type-based space.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -315,7 +316,29 @@ where
             nodes: IndexSet::default(),
         }
     }
+}
 
+impl<T, E, TI, EI> Default for SpaceContext<T, E, TI, EI>
+where
+    TI: SpaceInterner<Item = T> + Default,
+    EI: SpaceInterner<Item = E> + Default,
+{
+    fn default() -> Self {
+        Self {
+            types: TI::default(),
+            extractors: EI::default(),
+            nodes: IndexSet::default(),
+        }
+    }
+}
+
+impl<T, E, TI, EI> SpaceContext<T, E, TI, EI>
+where
+    T: Eq + Hash,
+    E: Eq + Hash,
+    TI: SpaceInterner<Item = T>,
+    EI: SpaceInterner<Item = E>,
+{
     /// Returns the empty space for this context.
     #[inline]
     pub fn empty(&self) -> Space<T, E> {
@@ -362,6 +385,53 @@ where
         }
     }
 
+    /// Returns a type space that may be decomposed by the engine.
+    pub fn of_type(&mut self, value_type: T) -> Space<T, E> {
+        let value_type = self.intern_type_value(value_type);
+        self.intern_type_key(value_type, true)
+    }
+
+    /// Returns a type space marked as coming from a direct pattern or diagnostic.
+    pub fn atomic_type(&mut self, value_type: T) -> Space<T, E> {
+        let value_type = self.intern_type_value(value_type);
+        self.intern_type_key(value_type, false)
+    }
+
+    /// Returns a product space for an extractor or constructor pattern.
+    pub fn product(
+        &mut self,
+        value_type: T,
+        extractor: E,
+        parameters: Vec<Space<T, E>>,
+    ) -> Space<T, E> {
+        let value_type = self.intern_type_value(value_type);
+        let extractor = self.intern_extractor_value(extractor);
+        self.intern_product_keys(value_type, extractor, parameters)
+    }
+
+    /// Returns the union of all spaces in the iterator.
+    ///
+    /// Empty unions collapse to the empty space and singleton unions collapse to
+    /// the single element.
+    pub fn union<I>(&mut self, spaces: I) -> Space<T, E>
+    where
+        I: IntoIterator<Item = Space<T, E>>,
+    {
+        let mut members = Vec::new();
+        for space in spaces {
+            self.extend_union_members(&mut members, space);
+        }
+        self.union_from_members(members)
+    }
+}
+
+impl<T, E, TI, EI> SpaceContext<T, E, TI, EI>
+where
+    T: Eq + Hash,
+    E: Eq + Hash,
+    TI: SpaceInterner<Item = T>,
+    EI: SpaceInterner<Item = E>,
+{
     fn lookup_node(
         &self,
         space: Space<T, E>,
@@ -381,102 +451,41 @@ where
             .expect("space id must reference a node in this context")
     }
 
-    fn type_by_key(&self, key: &TI::Key) -> TI::Ref<'_> {
+    fn type_by_key(&self, key: &TypeKey<TI>) -> TI::Ref<'_> {
         self.types.get(key)
     }
 
-    fn extractor_by_key(&self, key: &EI::Key) -> EI::Ref<'_> {
+    fn extractor_by_key(&self, key: &ExtractorKey<EI>) -> EI::Ref<'_> {
         self.extractors.get(key)
     }
-}
 
-impl<T, E, TI, EI> Default for SpaceContext<T, E, TI, EI>
-where
-    TI: SpaceInterner<Item = T> + Default,
-    EI: SpaceInterner<Item = E> + Default,
-{
-    fn default() -> Self {
-        Self {
-            types: TI::default(),
-            extractors: EI::default(),
-            nodes: IndexSet::default(),
-        }
-    }
-}
-
-impl<T, E, TI, EI> SpaceContext<T, E, TI, EI>
-where
-    T: Eq + Hash,
-    E: Eq + Hash,
-    TI: SpaceInterner<Item = T>,
-    EI: SpaceInterner<Item = E>,
-{
-    /// Returns a type space that may be decomposed by the engine.
-    pub fn of_type(&mut self, value_type: T) -> Space<T, E> {
-        let value_type = self.intern_type_value(value_type);
-        self.intern_type_id(value_type, true)
-    }
-
-    /// Returns a type space marked as coming from a direct pattern or diagnostic.
-    pub fn atomic_type(&mut self, value_type: T) -> Space<T, E> {
-        let value_type = self.intern_type_value(value_type);
-        self.intern_type_id(value_type, false)
-    }
-
-    /// Returns a product space for an extractor or constructor pattern.
-    pub fn product(
-        &mut self,
-        value_type: T,
-        extractor: E,
-        parameters: Vec<Space<T, E>>,
-    ) -> Space<T, E> {
-        let value_type = self.intern_type_value(value_type);
-        let extractor = self.intern_extractor_value(extractor);
-        self.intern_product_ids(value_type, extractor, parameters)
-    }
-
-    /// Returns the union of all spaces in the iterator.
-    ///
-    /// Empty unions collapse to the empty space and singleton unions collapse to
-    /// the single element.
-    pub fn union<I>(&mut self, spaces: I) -> Space<T, E>
-    where
-        I: IntoIterator<Item = Space<T, E>>,
-    {
-        let mut members = Vec::new();
-        for space in spaces {
-            self.extend_union_members(&mut members, space);
-        }
-        self.union_from_members(members)
-    }
-
-    fn intern_type_value(&mut self, value_type: T) -> TI::Key {
+    fn intern_type_value(&mut self, value_type: T) -> TypeKey<TI> {
         self.types.intern(value_type)
     }
 
-    fn intern_extractor_value(&mut self, extractor: E) -> EI::Key {
+    fn intern_extractor_value(&mut self, extractor: E) -> ExtractorKey<EI> {
         self.extractors.intern(extractor)
     }
 
-    fn intern_type_id(
+    fn intern_type_key(
         &mut self,
-        value_type: TI::Key,
+        value_type_key: TypeKey<TI>,
         introduced_by_decomposition: bool,
     ) -> Space<T, E> {
         self.intern_node(SpaceNode::Type {
-            value_type,
+            value_type: value_type_key,
             introduced_by_decomposition,
         })
     }
 
-    fn intern_product_ids(
+    fn intern_product_keys(
         &mut self,
-        value_type: TI::Key,
-        extractor: EI::Key,
+        value_type_key: TypeKey<TI>,
+        extractor: ExtractorKey<EI>,
         parameters: Vec<Space<T, E>>,
     ) -> Space<T, E> {
         self.intern_node(SpaceNode::Product {
-            value_type,
+            value_type: value_type_key,
             extractor,
             parameters: parameters.into_boxed_slice(),
         })
@@ -796,8 +805,8 @@ pub struct SpaceEngine<
     >,
 > {
     operations: O,
-    context: &'a mut SpaceContext<O::Type, O::Extractor, TI, EI>,
-    caches: Caches<O, TI, EI>,
+    context: &'a mut EngineContext<O, TI, EI>,
+    caches: Caches<O, TI>,
 }
 
 /// Checks a match expression without explicitly constructing a [`SpaceEngine`].
@@ -816,24 +825,21 @@ where
 }
 
 type EngineSpace<O> = Space<<O as SpaceOperations>::Type, <O as SpaceOperations>::Extractor>;
+type EngineContext<O, TI, EI> =
+    SpaceContext<<O as SpaceOperations>::Type, <O as SpaceOperations>::Extractor, TI, EI>;
+type DecompositionCache<TI> = HashMap<TypeKey<TI>, Decomposition<TypeKey<TI>>>;
 
-struct Caches<
-    O: SpaceOperations,
-    TI: SpaceInterner<Item = O::Type>,
-    EI: SpaceInterner<Item = O::Extractor>,
-> {
+struct Caches<O: SpaceOperations, TI: SpaceInterner<Item = O::Type>> {
     simplified_spaces: HashMap<EngineSpace<O>, EngineSpace<O>>,
     subspace_results: HashMap<(EngineSpace<O>, EngineSpace<O>), bool>,
-    decompositions: HashMap<TI::Key, Decomposition<TI::Key>>,
-    decomposed_unions: HashMap<TI::Key, EngineSpace<O>>,
-    _marker: PhantomData<fn() -> EI>,
+    decompositions: DecompositionCache<TI>,
+    decomposed_unions: HashMap<TypeKey<TI>, EngineSpace<O>>,
 }
 
-impl<O, TI, EI> Default for Caches<O, TI, EI>
+impl<O, TI> Default for Caches<O, TI>
 where
     O: SpaceOperations,
     TI: SpaceInterner<Item = O::Type>,
-    EI: SpaceInterner<Item = O::Extractor>,
 {
     fn default() -> Self {
         Self {
@@ -841,16 +847,14 @@ where
             subspace_results: HashMap::default(),
             decompositions: HashMap::default(),
             decomposed_unions: HashMap::default(),
-            _marker: PhantomData,
         }
     }
 }
 
-impl<O, TI, EI> Caches<O, TI, EI>
+impl<O, TI> Caches<O, TI>
 where
     O: SpaceOperations,
     TI: SpaceInterner<Item = O::Type>,
-    EI: SpaceInterner<Item = O::Extractor>,
 {
     fn clear(&mut self) {
         self.simplified_spaces.clear();
@@ -872,10 +876,7 @@ where
     EI: SpaceInterner<Item = O::Extractor>,
 {
     /// Creates a new engine for an operations implementation.
-    pub fn new(
-        operations: O,
-        context: &'a mut SpaceContext<O::Type, O::Extractor, TI, EI>,
-    ) -> Self {
+    pub fn new(operations: O, context: &'a mut EngineContext<O, TI, EI>) -> Self {
         Self {
             operations,
             context,
@@ -889,7 +890,7 @@ where
     }
 
     /// Returns the space context used by the engine.
-    pub fn context(&self) -> &SpaceContext<O::Type, O::Extractor, TI, EI> {
+    pub fn context(&self) -> &EngineContext<O, TI, EI> {
         self.context
     }
 
@@ -899,24 +900,28 @@ where
     }
 
     #[inline]
-    fn type_ref(&self, key: &TI::Key) -> TI::Ref<'_> {
+    fn type_ref(&self, key: &TypeKey<TI>) -> TI::Ref<'_> {
         self.context.type_by_key(key)
     }
 
     #[inline]
-    fn extractor_ref(&self, key: &EI::Key) -> EI::Ref<'_> {
+    fn extractor_ref(&self, key: &ExtractorKey<EI>) -> EI::Ref<'_> {
         self.context.extractor_by_key(key)
     }
 
     #[inline]
-    fn is_subtype_id(&self, left: &TI::Key, right: &TI::Key) -> bool {
+    fn is_subtype_key(&self, left: &TypeKey<TI>, right: &TypeKey<TI>) -> bool {
         let left = self.type_ref(left);
         let right = self.type_ref(right);
         self.operations.is_subtype(left.borrow(), right.borrow())
     }
 
     #[inline]
-    fn extractors_are_equivalent_id(&self, left: &EI::Key, right: &EI::Key) -> bool {
+    fn extractors_are_equivalent_key(
+        &self,
+        left: &ExtractorKey<EI>,
+        right: &ExtractorKey<EI>,
+    ) -> bool {
         let left = self.extractor_ref(left);
         let right = self.extractor_ref(right);
         self.operations
@@ -924,15 +929,69 @@ where
     }
 
     #[inline]
+    fn decompose_type_key(&self, key: &TypeKey<TI>) -> Decomposition<O::Type> {
+        let value_type = self.type_ref(key);
+        self.operations.decompose_type(value_type.borrow())
+    }
+
+    #[inline]
+    fn intersect_atomic_type_keys(
+        &self,
+        left: &TypeKey<TI>,
+        right: &TypeKey<TI>,
+    ) -> AtomicIntersection<O::Type> {
+        let left = self.type_ref(left);
+        let right = self.type_ref(right);
+        self.operations
+            .intersect_atomic_types(left.borrow(), right.borrow())
+    }
+
+    #[inline]
+    fn extractor_covers_type_key(
+        &self,
+        extractor: &ExtractorKey<EI>,
+        scrutinee_type: &TypeKey<TI>,
+        arity: usize,
+    ) -> bool {
+        let extractor = self.extractor_ref(extractor);
+        let scrutinee_type = self.type_ref(scrutinee_type);
+        self.operations
+            .extractor_covers_type(extractor.borrow(), scrutinee_type.borrow(), arity)
+    }
+
+    #[inline]
+    fn extractor_parameter_types_key(
+        &self,
+        extractor: &ExtractorKey<EI>,
+        scrutinee_type: &TypeKey<TI>,
+        arity: usize,
+    ) -> Vec<O::Type> {
+        let extractor = self.extractor_ref(extractor);
+        let scrutinee_type = self.type_ref(scrutinee_type);
+        self.operations.extractor_parameter_types(
+            extractor.borrow(),
+            scrutinee_type.borrow(),
+            arity,
+        )
+    }
+
+    #[inline]
+    fn allow_right_hand_decomposition_key(&self, key: &TypeKey<TI>) -> bool {
+        let value_type = self.type_ref(key);
+        self.operations
+            .allow_right_hand_decomposition(value_type.borrow())
+    }
+
+    #[inline]
     fn same_product_shape(
         &self,
-        left_extractor: &EI::Key,
-        right_extractor: &EI::Key,
+        left_extractor: &ExtractorKey<EI>,
+        right_extractor: &ExtractorKey<EI>,
         left_arity: usize,
         right_arity: usize,
     ) -> bool {
         left_arity == right_arity
-            && self.extractors_are_equivalent_id(left_extractor, right_extractor)
+            && self.extractors_are_equivalent_key(left_extractor, right_extractor)
     }
 
     #[inline]
@@ -946,24 +1005,24 @@ where
     }
 
     #[inline]
-    fn make_type_space_from_id(
+    fn make_type_space_from_key(
         &mut self,
-        value_type: TI::Key,
+        value_type_key: TypeKey<TI>,
         introduced_by_decomposition: bool,
     ) -> EngineSpace<O> {
         self.context
-            .intern_type_id(value_type, introduced_by_decomposition)
+            .intern_type_key(value_type_key, introduced_by_decomposition)
     }
 
     #[inline]
-    fn make_product_space_from_ids(
+    fn make_product_space_from_keys(
         &mut self,
-        value_type: TI::Key,
-        extractor: EI::Key,
+        value_type_key: TypeKey<TI>,
+        extractor: ExtractorKey<EI>,
         parameters: Vec<EngineSpace<O>>,
     ) -> EngineSpace<O> {
         self.context
-            .intern_product_ids(value_type, extractor, parameters)
+            .intern_product_keys(value_type_key, extractor, parameters)
     }
 
     #[inline]
@@ -1009,10 +1068,10 @@ where
 
     fn filtered_decomposed_type_union(
         &mut self,
-        value_type: TI::Key,
+        value_type_key: TypeKey<TI>,
         covering_space: EngineSpace<O>,
     ) -> Option<EngineSpace<O>> {
-        let parts = match self.decomposition_for_type(value_type.clone()) {
+        let parts = match self.decomposition_for_type_key(value_type_key.clone()) {
             Decomposition::NotDecomposable => return None,
             Decomposition::Empty => return Some(self.empty_space()),
             Decomposition::Parts(parts) => parts.clone(),
@@ -1020,7 +1079,7 @@ where
 
         let mut uncovered_parts = Vec::with_capacity(parts.len());
         for part in parts {
-            let part_space = self.make_type_space_from_id(part, true);
+            let part_space = self.make_type_space_from_key(part, true);
             if !self.is_subspace(part_space, covering_space) {
                 uncovered_parts.push(part_space);
             }
@@ -1031,34 +1090,22 @@ where
 
     fn lifted_product_space(
         &mut self,
-        scrutinee_type: TI::Key,
-        accepted_type: TI::Key,
-        extractor: EI::Key,
+        scrutinee_type: TypeKey<TI>,
+        accepted_type: TypeKey<TI>,
+        extractor: ExtractorKey<EI>,
         arity: usize,
-        result_value_type: TI::Key,
+        result_value_type_key: TypeKey<TI>,
     ) -> Option<EngineSpace<O>> {
-        if !self.is_subtype_id(&scrutinee_type, &accepted_type) {
+        if !self.is_subtype_key(&scrutinee_type, &accepted_type) {
             return None;
         }
 
-        let parameter_types = {
-            let extractor_ref = self.extractor_ref(&extractor);
-            let scrutinee_type_ref = self.type_ref(&scrutinee_type);
+        if !self.extractor_covers_type_key(&extractor, &scrutinee_type, arity) {
+            return None;
+        }
 
-            if !self.operations.extractor_covers_type(
-                extractor_ref.borrow(),
-                scrutinee_type_ref.borrow(),
-                arity,
-            ) {
-                return None;
-            }
-
-            self.operations.extractor_parameter_types(
-                extractor_ref.borrow(),
-                scrutinee_type_ref.borrow(),
-                arity,
-            )
-        };
+        let parameter_types =
+            self.extractor_parameter_types_key(&extractor, &scrutinee_type, arity);
 
         debug_assert_eq!(
             parameter_types.len(),
@@ -1071,7 +1118,7 @@ where
             lifted_parameters.push(self.make_atomic_type_space(parameter_type));
         }
 
-        Some(self.make_product_space_from_ids(result_value_type, extractor, lifted_parameters))
+        Some(self.make_product_space_from_keys(result_value_type_key, extractor, lifted_parameters))
     }
 
     /// Simplifies a space by removing impossible branches and collapsing unions.
@@ -1083,16 +1130,16 @@ where
         let simplified_space = match self.context.node(space) {
             None => self.empty_space(),
             Some(SpaceNode::Type { value_type, .. }) => {
-                let value_type = value_type.clone();
-                if self.type_is_uninhabited(value_type) {
+                let value_type_key = value_type.clone();
+                if self.type_key_is_uninhabited(value_type_key) {
                     self.empty_space()
                 } else {
                     space
                 }
             }
             Some(SpaceNode::Product { value_type, .. }) => {
-                let value_type = value_type.clone();
-                if self.type_is_uninhabited(value_type.clone()) {
+                let value_type_key = value_type.clone();
+                if self.type_key_is_uninhabited(value_type_key.clone()) {
                     self.empty_space()
                 } else {
                     let (extractor, parameters) = match self.context.node(space) {
@@ -1121,8 +1168,8 @@ where
                     }
 
                     if changed {
-                        self.make_product_space_from_ids(
-                            value_type,
+                        self.make_product_space_from_keys(
+                            value_type_key,
                             extractor,
                             simplified_parameters,
                         )
@@ -1216,65 +1263,65 @@ where
             }
             (
                 Some(SpaceNode::Type {
-                    value_type: left_type_id,
+                    value_type: left_type_key,
                     ..
                 }),
                 Some(SpaceNode::Type {
-                    value_type: right_type_id,
+                    value_type: right_type_key,
                     ..
                 }),
             ) => {
-                let left_type_id = left_type_id.clone();
-                let right_type_id = right_type_id.clone();
+                let left_type_key = left_type_key.clone();
+                let right_type_key = right_type_key.clone();
 
-                if self.is_subtype_id(&left_type_id, &right_type_id) {
+                if self.is_subtype_key(&left_type_key, &right_type_key) {
                     left_space
-                } else if self.is_subtype_id(&right_type_id, &left_type_id) {
+                } else if self.is_subtype_key(&right_type_key, &left_type_key) {
                     right_space
                 } else {
-                    self.build_atomic_intersection(left_type_id, right_type_id, left_space)
+                    self.build_atomic_intersection(left_type_key, right_type_key, left_space)
                 }
             }
             (
                 Some(SpaceNode::Type {
-                    value_type: left_type_id,
+                    value_type: left_type_key,
                     ..
                 }),
                 Some(SpaceNode::Product {
-                    value_type: right_type_id,
+                    value_type: right_type_key,
                     ..
                 }),
             ) => {
-                let left_type_id = left_type_id.clone();
-                let right_type_id = right_type_id.clone();
+                let left_type_key = left_type_key.clone();
+                let right_type_key = right_type_key.clone();
 
-                if self.is_subtype_id(&right_type_id, &left_type_id) {
+                if self.is_subtype_key(&right_type_key, &left_type_key) {
                     right_space
-                } else if self.is_subtype_id(&left_type_id, &right_type_id) {
+                } else if self.is_subtype_key(&left_type_key, &right_type_key) {
                     left_space
                 } else {
-                    self.build_atomic_intersection(left_type_id, right_type_id, right_space)
+                    self.build_atomic_intersection(left_type_key, right_type_key, right_space)
                 }
             }
             (
                 Some(SpaceNode::Product {
-                    value_type: left_type_id,
+                    value_type: left_type_key,
                     ..
                 }),
                 Some(SpaceNode::Type {
-                    value_type: right_type_id,
+                    value_type: right_type_key,
                     ..
                 }),
             ) => {
-                let left_type_id = left_type_id.clone();
-                let right_type_id = right_type_id.clone();
+                let left_type_key = left_type_key.clone();
+                let right_type_key = right_type_key.clone();
 
-                if self.is_subtype_id(&left_type_id, &right_type_id)
-                    || self.is_subtype_id(&right_type_id, &left_type_id)
+                if self.is_subtype_key(&left_type_key, &right_type_key)
+                    || self.is_subtype_key(&right_type_key, &left_type_key)
                 {
                     left_space
                 } else {
-                    self.build_atomic_intersection(left_type_id, right_type_id, left_space)
+                    self.build_atomic_intersection(left_type_key, right_type_key, left_space)
                 }
             }
             (
@@ -1284,14 +1331,14 @@ where
                     parameters: left_parameters,
                 }),
                 Some(SpaceNode::Product {
-                    value_type: right_value_type,
+                    value_type: right_value_key,
                     extractor: right_extractor,
                     parameters: right_parameters,
                 }),
             ) => {
-                let value_type = value_type.clone();
+                let value_type_key = value_type.clone();
                 let extractor = extractor.clone();
-                let right_value_type = right_value_type.clone();
+                let right_value_key = right_value_key.clone();
 
                 if !self.same_product_shape(
                     &extractor,
@@ -1299,7 +1346,7 @@ where
                     left_parameters.len(),
                     right_parameters.len(),
                 ) {
-                    self.build_atomic_intersection(value_type, right_value_type, left_space)
+                    self.build_atomic_intersection(value_type_key, right_value_key, left_space)
                 } else {
                     let left_parameters = left_parameters.to_vec();
                     let right_parameters = right_parameters.to_vec();
@@ -1316,7 +1363,11 @@ where
                         intersected_parameters.push(parameter);
                     }
 
-                    self.make_product_space_from_ids(value_type, extractor, intersected_parameters)
+                    self.make_product_space_from_keys(
+                        value_type_key,
+                        extractor,
+                        intersected_parameters,
+                    )
                 }
             }
         }
@@ -1368,24 +1419,24 @@ where
             }
             (
                 Some(SpaceNode::Type {
-                    value_type: left_type_id,
+                    value_type: left_type_key,
                     ..
                 }),
                 Some(SpaceNode::Type {
-                    value_type: right_type_id,
+                    value_type: right_type_key,
                     ..
                 }),
             ) => {
-                let left_type_id = left_type_id.clone();
-                let right_type_id = right_type_id.clone();
+                let left_type_key = left_type_key.clone();
+                let right_type_key = right_type_key.clone();
 
-                if self.is_subtype_id(&left_type_id, &right_type_id) {
+                if self.is_subtype_key(&left_type_key, &right_type_key) {
                     self.empty_space()
-                } else if self.is_decomposable(left_type_id.clone()) {
-                    let decomposed_union = self.decomposed_type_union(left_type_id);
+                } else if self.is_decomposable(left_type_key.clone()) {
+                    let decomposed_union = self.decomposed_type_key_union(left_type_key);
                     self.subtract(decomposed_union, right_space)
-                } else if self.is_decomposable(right_type_id.clone()) {
-                    let decomposed_union = self.decomposed_type_union(right_type_id);
+                } else if self.is_decomposable(right_type_key.clone()) {
+                    let decomposed_union = self.decomposed_type_key_union(right_type_key);
                     self.subtract(left_space, decomposed_union)
                 } else {
                     left_space
@@ -1393,27 +1444,27 @@ where
             }
             (
                 Some(SpaceNode::Type {
-                    value_type: left_type_id,
+                    value_type: left_type_key,
                     ..
                 }),
                 Some(SpaceNode::Product {
-                    value_type: right_value_type,
+                    value_type: right_value_key,
                     extractor: right_extractor,
                     parameters: right_parameters,
                 }),
             ) => {
-                let left_type_id = left_type_id.clone();
+                let left_type_key = left_type_key.clone();
 
                 if let Some(lifted_product_space) = self.lifted_product_space(
-                    left_type_id.clone(),
-                    right_value_type.clone(),
+                    left_type_key.clone(),
+                    right_value_key.clone(),
                     right_extractor.clone(),
                     right_parameters.len(),
-                    left_type_id.clone(),
+                    left_type_key.clone(),
                 ) {
                     self.subtract(lifted_product_space, right_space)
-                } else if self.is_decomposable(left_type_id.clone()) {
-                    let decomposed_union = self.decomposed_type_union(left_type_id);
+                } else if self.is_decomposable(left_type_key.clone()) {
+                    let decomposed_union = self.decomposed_type_key_union(left_type_key);
                     self.subtract(decomposed_union, right_space)
                 } else {
                     left_space
@@ -1421,25 +1472,25 @@ where
             }
             (
                 Some(SpaceNode::Product {
-                    value_type: left_type_id,
+                    value_type: left_type_key,
                     ..
                 }),
                 Some(SpaceNode::Type {
-                    value_type: right_type_id,
+                    value_type: right_type_key,
                     ..
                 }),
             ) => {
-                let left_type_id = left_type_id.clone();
-                let right_type_id = right_type_id.clone();
+                let left_type_key = left_type_key.clone();
+                let right_type_key = right_type_key.clone();
 
-                if self.is_subtype_id(&left_type_id, &right_type_id) {
+                if self.is_subtype_key(&left_type_key, &right_type_key) {
                     self.empty_space()
                 } else {
                     let simplified_left = self.simplify(left_space);
                     if simplified_left.is_empty() {
                         self.empty_space()
-                    } else if self.is_decomposable(right_type_id.clone()) {
-                        let decomposed_union = self.decomposed_type_union(right_type_id);
+                    } else if self.is_decomposable(right_type_key.clone()) {
+                        let decomposed_union = self.decomposed_type_key_union(right_type_key);
                         self.subtract(simplified_left, decomposed_union)
                     } else {
                         simplified_left
@@ -1458,7 +1509,7 @@ where
                     ..
                 }),
             ) => {
-                let value_type = value_type.clone();
+                let value_type_key = value_type.clone();
                 let extractor = extractor.clone();
 
                 if !self.same_product_shape(
@@ -1513,8 +1564,8 @@ where
                         {
                             for &flattened_space in flattened_spaces {
                                 scratch[parameter_index] = flattened_space;
-                                remaining_spaces.push(self.make_product_space_from_ids(
-                                    value_type.clone(),
+                                remaining_spaces.push(self.make_product_space_from_keys(
+                                    value_type_key.clone(),
                                     extractor.clone(),
                                     scratch.clone(),
                                 ));
@@ -1559,12 +1610,12 @@ where
         self.simplify(remainder)
     }
 
-    fn decomposition_for_type(&mut self, value_type: TI::Key) -> &Decomposition<TI::Key> {
-        if self.caches.decompositions.get(&value_type).is_none() {
-            let decomposition = {
-                let value_type_ref = self.type_ref(&value_type);
-                self.operations.decompose_type(value_type_ref.borrow())
-            };
+    fn decomposition_for_type_key(
+        &mut self,
+        value_type_key: TypeKey<TI>,
+    ) -> &Decomposition<TypeKey<TI>> {
+        if self.caches.decompositions.get(&value_type_key).is_none() {
+            let decomposition = self.decompose_type_key(&value_type_key);
 
             let decomposition = match decomposition {
                 Decomposition::NotDecomposable => Decomposition::NotDecomposable,
@@ -1586,38 +1637,39 @@ where
 
             self.caches
                 .decompositions
-                .insert(value_type.clone(), decomposition);
+                .insert(value_type_key.clone(), decomposition);
         }
 
         self.caches
             .decompositions
-            .get(&value_type)
+            .get(&value_type_key)
             .expect("decomposition cache entry must exist")
     }
 
-    fn is_decomposable(&mut self, value_type: TI::Key) -> bool {
-        self.decomposition_for_type(value_type).is_decomposable()
+    fn is_decomposable(&mut self, value_type_key: TypeKey<TI>) -> bool {
+        self.decomposition_for_type_key(value_type_key)
+            .is_decomposable()
     }
 
-    fn type_is_uninhabited(&mut self, value_type: TI::Key) -> bool {
+    fn type_key_is_uninhabited(&mut self, value_type_key: TypeKey<TI>) -> bool {
         matches!(
-            self.decomposition_for_type(value_type),
+            self.decomposition_for_type_key(value_type_key),
             Decomposition::Empty,
         )
     }
 
-    fn decomposed_type_union(&mut self, value_type: TI::Key) -> EngineSpace<O> {
-        if let Some(&cached_union) = self.caches.decomposed_unions.get(&value_type) {
+    fn decomposed_type_key_union(&mut self, value_type_key: TypeKey<TI>) -> EngineSpace<O> {
+        if let Some(&cached_union) = self.caches.decomposed_unions.get(&value_type_key) {
             return cached_union;
         }
 
-        let decomposed_union = match self.decomposition_for_type(value_type.clone()) {
+        let decomposed_union = match self.decomposition_for_type_key(value_type_key.clone()) {
             Decomposition::NotDecomposable | Decomposition::Empty => self.empty_space(),
             Decomposition::Parts(parts) => {
                 let parts = parts.clone();
                 let mut spaces = Vec::with_capacity(parts.len());
                 for decomposed_type in parts {
-                    spaces.push(self.make_type_space_from_id(decomposed_type, true));
+                    spaces.push(self.make_type_space_from_key(decomposed_type, true));
                 }
                 self.build_union(spaces)
             }
@@ -1625,22 +1677,17 @@ where
 
         self.caches
             .decomposed_unions
-            .insert(value_type, decomposed_union);
+            .insert(value_type_key, decomposed_union);
         decomposed_union
     }
 
     fn build_atomic_intersection(
         &mut self,
-        left: TI::Key,
-        right: TI::Key,
+        left: TypeKey<TI>,
+        right: TypeKey<TI>,
         preferred_space: EngineSpace<O>,
     ) -> EngineSpace<O> {
-        let intersection = {
-            let left_type = self.type_ref(&left);
-            let right_type = self.type_ref(&right);
-            self.operations
-                .intersect_atomic_types(left_type.borrow(), right_type.borrow())
-        };
+        let intersection = self.intersect_atomic_type_keys(&left, &right);
 
         match intersection {
             AtomicIntersection::Empty => self.empty_space(),
@@ -1651,12 +1698,12 @@ where
                         introduced_by_decomposition,
                         ..
                     }) => self
-                        .make_type_space_from_id(intersection_type, *introduced_by_decomposition),
+                        .make_type_space_from_key(intersection_type, *introduced_by_decomposition),
                     Some(SpaceNode::Product {
                         extractor,
                         parameters,
                         ..
-                    }) => self.make_product_space_from_ids(
+                    }) => self.make_product_space_from_keys(
                         intersection_type,
                         extractor.clone(),
                         parameters.to_vec(),
@@ -1685,10 +1732,10 @@ where
                     extractor,
                     parameters,
                 }) => {
-                    let value_type = value_type.clone();
+                    let value_type_key = value_type.clone();
                     let extractor = extractor.clone();
                     let parameters = parameters.to_vec();
-                    self.flatten_product(value_type, extractor, parameters, flattened);
+                    self.flatten_product(value_type_key, extractor, parameters, flattened);
                 }
                 Some(SpaceNode::Union(spaces)) => {
                     pending.extend(spaces.iter().rev().copied());
@@ -1700,8 +1747,8 @@ where
 
     fn flatten_product(
         &mut self,
-        value_type: TI::Key,
-        extractor: EI::Key,
+        value_type_key: TypeKey<TI>,
+        extractor: ExtractorKey<EI>,
         parameters: Vec<EngineSpace<O>>,
         flattened: &mut Vec<EngineSpace<O>>,
     ) {
@@ -1711,7 +1758,11 @@ where
         }
 
         if parameter_options.is_empty() {
-            flattened.push(self.make_product_space_from_ids(value_type, extractor, Vec::new()));
+            flattened.push(self.make_product_space_from_keys(
+                value_type_key,
+                extractor,
+                Vec::new(),
+            ));
             return;
         }
 
@@ -1726,8 +1777,8 @@ where
         }
 
         loop {
-            flattened.push(self.make_product_space_from_ids(
-                value_type.clone(),
+            flattened.push(self.make_product_space_from_keys(
+                value_type_key.clone(),
                 extractor.clone(),
                 current.clone(),
             ));
@@ -1763,24 +1814,24 @@ where
     fn estimated_space_size_with_visited(
         &mut self,
         space: EngineSpace<O>,
-        visited_types: &mut HashSet<TI::Key>,
+        visited_types: &mut HashSet<TypeKey<TI>>,
     ) -> usize {
         match self.context.node(space) {
             None => 0,
             Some(SpaceNode::Type { value_type, .. }) => {
-                let value_type = value_type.clone();
-                if !visited_types.insert(value_type.clone()) {
+                let value_type_key = value_type.clone();
+                if !visited_types.insert(value_type_key.clone()) {
                     return 1;
                 }
 
-                let estimate = match self.decomposition_for_type(value_type.clone()) {
+                let estimate = match self.decomposition_for_type_key(value_type_key.clone()) {
                     Decomposition::NotDecomposable => 1,
                     Decomposition::Empty => 0,
                     Decomposition::Parts(parts) => {
                         let parts = parts.clone();
                         let mut total = 0usize;
                         for part in parts {
-                            let part_space = self.make_type_space_from_id(part, true);
+                            let part_space = self.make_type_space_from_key(part, true);
                             total = total.saturating_add(
                                 self.estimated_space_size_with_visited(part_space, visited_types),
                             );
@@ -1789,7 +1840,7 @@ where
                     }
                 };
 
-                visited_types.remove(&value_type);
+                visited_types.remove(&value_type_key);
                 estimate
             }
             Some(SpaceNode::Product { parameters, .. }) => {
@@ -2029,7 +2080,7 @@ where
                 }),
                 Some(SpaceNode::Union(members)),
             ) => {
-                let left_type = left_type.clone();
+                let left_type_key = left_type.clone();
                 let members = members.to_vec();
 
                 for member in members {
@@ -2038,7 +2089,7 @@ where
                     }
                 }
 
-                match self.filtered_decomposed_type_union(left_type, right_space) {
+                match self.filtered_decomposed_type_union(left_type_key, right_space) {
                     Some(filtered_left) => filtered_left.is_empty(),
                     None => false,
                 }
@@ -2049,30 +2100,28 @@ where
             }
             (
                 Some(SpaceNode::Type {
-                    value_type: left_type_id,
+                    value_type: left_type_key,
                     ..
                 }),
                 Some(SpaceNode::Type {
-                    value_type: right_type_id,
+                    value_type: right_type_key,
                     ..
                 }),
             ) => {
-                let left_type_id = left_type_id.clone();
-                let right_type_id = right_type_id.clone();
-                let left_is_subtype = self.is_subtype_id(&left_type_id, &right_type_id);
-                let allow_right_decomposition = {
-                    let right_type = self.type_ref(&right_type_id);
-                    self.operations
-                        .allow_right_hand_decomposition(right_type.borrow())
-                };
+                let left_type_key = left_type_key.clone();
+                let right_type_key = right_type_key.clone();
+                let left_is_subtype = self.is_subtype_key(&left_type_key, &right_type_key);
+                let allow_right_decomposition =
+                    self.allow_right_hand_decomposition_key(&right_type_key);
 
                 if left_is_subtype {
                     true
-                } else if self.is_decomposable(left_type_id.clone()) {
-                    let decomposed_union = self.decomposed_type_union(left_type_id);
+                } else if self.is_decomposable(left_type_key.clone()) {
+                    let decomposed_union = self.decomposed_type_key_union(left_type_key);
                     self.is_subspace(decomposed_union, right_space)
-                } else if allow_right_decomposition && self.is_decomposable(right_type_id.clone()) {
-                    let decomposed_union = self.decomposed_type_union(right_type_id);
+                } else if allow_right_decomposition && self.is_decomposable(right_type_key.clone())
+                {
+                    let decomposed_union = self.decomposed_type_key_union(right_type_key);
                     self.is_subspace(left_space, decomposed_union)
                 } else {
                     false
@@ -2080,38 +2129,38 @@ where
             }
             (
                 Some(SpaceNode::Product {
-                    value_type: left_type_id,
+                    value_type: left_type_key,
                     ..
                 }),
                 Some(SpaceNode::Type {
-                    value_type: right_type_id,
+                    value_type: right_type_key,
                     ..
                 }),
-            ) => self.is_subtype_id(left_type_id, right_type_id),
+            ) => self.is_subtype_key(left_type_key, right_type_key),
             (
                 Some(SpaceNode::Type {
-                    value_type: left_type_id,
+                    value_type: left_type_key,
                     ..
                 }),
                 Some(SpaceNode::Product {
-                    value_type: right_value_type,
+                    value_type: right_value_key,
                     extractor: right_extractor,
                     parameters: right_parameters,
                 }),
             ) => {
-                let left_type_id = left_type_id.clone();
-                let right_value_type = right_value_type.clone();
+                let left_type_key = left_type_key.clone();
+                let right_value_key = right_value_key.clone();
 
                 if let Some(lifted_product_space) = self.lifted_product_space(
-                    left_type_id.clone(),
-                    right_value_type.clone(),
+                    left_type_key.clone(),
+                    right_value_key.clone(),
                     right_extractor.clone(),
                     right_parameters.len(),
-                    right_value_type.clone(),
+                    right_value_key.clone(),
                 ) {
                     self.is_subspace(lifted_product_space, right_space)
-                } else if self.is_decomposable(left_type_id.clone()) {
-                    let decomposed_union = self.decomposed_type_union(left_type_id);
+                } else if self.is_decomposable(left_type_key.clone()) {
+                    let decomposed_union = self.decomposed_type_key_union(left_type_key);
                     self.is_subspace(decomposed_union, right_space)
                 } else {
                     false
