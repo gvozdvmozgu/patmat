@@ -1,6 +1,7 @@
 use super::{
-    AtomicIntersection, Decomposition, MatchArm, MatchInput, Space, SpaceContext, SpaceEngine,
-    SpaceKind, SpaceLookupError, SpaceOperations, check_match,
+    AtomicIntersection, Decomposition, DedupInterner, IdentityInterner, MatchArm, MatchInput,
+    PreInternedSpaceContext, Space, SpaceContext, SpaceEngine, SpaceKind, SpaceLookupError,
+    SpaceOperations, check_match,
 };
 use std::marker::PhantomData;
 
@@ -69,6 +70,71 @@ impl SpaceOperations for TestOperations {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct IdType(u8);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct IdExtractor(u8);
+
+#[derive(Clone, Copy, Debug)]
+struct IdOperations;
+
+impl SpaceOperations for IdOperations {
+    type Type = IdType;
+    type Extractor = IdExtractor;
+
+    fn decompose_type(&self, value_type: &Self::Type) -> Decomposition<Self::Type> {
+        match *value_type {
+            IdType(0) => Decomposition::parts(vec![IdType(1), IdType(2)]),
+            _ => Decomposition::NotDecomposable,
+        }
+    }
+
+    fn is_subtype(&self, left: &Self::Type, right: &Self::Type) -> bool {
+        left == right || matches!((left, right), (IdType(1) | IdType(2), IdType(0)))
+    }
+
+    fn extractors_are_equivalent(&self, left: &Self::Extractor, right: &Self::Extractor) -> bool {
+        left == right
+    }
+
+    fn extractor_parameter_types(
+        &self,
+        extractor: &Self::Extractor,
+        scrutinee_type: &Self::Type,
+        arity: usize,
+    ) -> Vec<Self::Type> {
+        match (*extractor, *scrutinee_type, arity) {
+            (IdExtractor(7), IdType(3), 1) => vec![IdType(0)],
+            _ => Vec::new(),
+        }
+    }
+
+    fn extractor_covers_type(
+        &self,
+        extractor: &Self::Extractor,
+        scrutinee_type: &Self::Type,
+        arity: usize,
+    ) -> bool {
+        matches!(
+            (*extractor, *scrutinee_type, arity),
+            (IdExtractor(7), IdType(3), 1)
+        )
+    }
+
+    fn intersect_atomic_types(
+        &self,
+        left: &Self::Type,
+        right: &Self::Type,
+    ) -> AtomicIntersection<Self::Type> {
+        if left == right {
+            AtomicIntersection::Type(*left)
+        } else {
+            AtomicIntersection::Empty
+        }
+    }
+}
+
 #[test]
 fn context_reuses_equivalent_union_structure() {
     let mut context: SpaceContext<TestType, TestExtractor> = SpaceContext::new();
@@ -129,6 +195,60 @@ fn check_match_accepts_borrowed_operations() {
 
     assert!(analysis.is_exhaustive());
     assert!(analysis.reachability_warnings.is_empty());
+}
+
+#[test]
+fn preinterned_context_uses_identity_keys_without_value_tables() {
+    let mut context: PreInternedSpaceContext<IdType, IdExtractor> = PreInternedSpaceContext::new();
+
+    let whole = context.of_type(IdType(0));
+    let left = context.of_type(IdType(1));
+    let right = context.atomic_type(IdType(2));
+    let union = context.union([left, right]);
+    let product = context.product(IdType(3), IdExtractor(7), vec![whole]);
+
+    match product.kind(&context) {
+        SpaceKind::Product(kind) => {
+            assert_eq!(kind.value_type, IdType(3));
+            assert_eq!(kind.extractor, IdExtractor(7));
+            assert_eq!(kind.parameters, &[whole]);
+        }
+        other => panic!("expected pre-interned product space, got {:?}", other),
+    }
+
+    let input = MatchInput::new(whole, vec![MatchArm::new(left), MatchArm::new(right)]);
+    let analysis = check_match(IdOperations, &mut context, &input);
+    assert!(analysis.is_exhaustive());
+
+    let mut engine = SpaceEngine::new(IdOperations, &mut context);
+    assert!(engine.is_subspace(whole, union));
+    engine.clear_caches();
+    assert!(engine.is_subspace(whole, union));
+}
+
+#[test]
+fn context_accepts_mixed_explicit_interners() {
+    let mut context: SpaceContext<
+        IdType,
+        IdExtractor,
+        IdentityInterner<IdType>,
+        DedupInterner<IdExtractor>,
+    > = SpaceContext::with_interners(IdentityInterner::default(), DedupInterner::default());
+
+    let parameter = context.of_type(IdType(1));
+    let product = context.product(IdType(3), IdExtractor(7), vec![parameter]);
+
+    match product.kind(&context) {
+        SpaceKind::Product(kind) => {
+            assert_eq!(kind.value_type, IdType(3));
+            assert_eq!(kind.extractor, &IdExtractor(7));
+            assert_eq!(kind.parameters, &[parameter]);
+        }
+        other => panic!(
+            "expected product space from mixed interners, got {:?}",
+            other
+        ),
+    }
 }
 
 #[test]

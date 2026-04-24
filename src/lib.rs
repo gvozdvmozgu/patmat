@@ -1,7 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 
-use std::{cmp::Reverse, error::Error, fmt, hash::Hash, marker::PhantomData};
+use std::{borrow::Borrow, cmp::Reverse, error::Error, fmt, hash::Hash, marker::PhantomData};
 
 type Hasher = foldhash::fast::RandomState;
 type IndexSet<T> = indexmap::IndexSet<T, Hasher>;
@@ -15,14 +15,15 @@ fn index_to_u32(index: usize, kind: &str) -> u32 {
     u32::try_from(index).unwrap_or_else(|_| panic!("too many interned {kind}: exceeded u32::MAX"))
 }
 
+/// Opaque key returned by [`DedupInterner`].
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct Type(u32);
+pub struct InternedId(u32);
 
-impl Type {
+impl InternedId {
     #[inline]
     fn from_index(index: usize) -> Self {
-        Self(index_to_u32(index, "types"))
+        Self(index_to_u32(index, "values"))
     }
 
     #[inline]
@@ -31,19 +32,89 @@ impl Type {
     }
 }
 
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct Extractor(u32);
+/// Interns user values into stable keys used by [`SpaceContext`].
+pub trait SpaceInterner {
+    /// The caller-facing value represented by this interner.
+    type Item: Eq + Hash + fmt::Debug;
 
-impl Extractor {
-    #[inline]
-    fn from_index(index: usize) -> Self {
-        Self(index_to_u32(index, "extractors"))
+    /// The key stored in space nodes and engine caches.
+    type Key: Clone + Eq + Hash + fmt::Debug;
+
+    /// A resolved view of an interned item.
+    type Ref<'a>: Borrow<Self::Item>
+    where
+        Self: 'a,
+        Self::Item: 'a;
+
+    /// Interns `item` and returns its stable key.
+    fn intern(&mut self, item: Self::Item) -> Self::Key;
+
+    /// Resolves a key back to the represented item.
+    ///
+    /// Implementations may panic when `key` did not come from this interner.
+    fn get<'a>(&'a self, key: &Self::Key) -> Self::Ref<'a>;
+}
+
+/// Deduplicating interner used by the default [`SpaceContext`].
+pub struct DedupInterner<T> {
+    values: IndexSet<T>,
+}
+
+impl<T> Default for DedupInterner<T> {
+    fn default() -> Self {
+        Self {
+            values: IndexSet::default(),
+        }
+    }
+}
+
+impl<T: Eq + Hash + fmt::Debug> SpaceInterner for DedupInterner<T> {
+    type Item = T;
+    type Key = InternedId;
+    type Ref<'a>
+        = &'a T
+    where
+        T: 'a;
+
+    fn intern(&mut self, item: Self::Item) -> Self::Key {
+        let (index, _) = self.values.insert_full(item);
+        InternedId::from_index(index)
     }
 
-    #[inline]
-    fn index(self) -> usize {
-        self.0 as usize
+    fn get<'a>(&'a self, key: &Self::Key) -> Self::Ref<'a> {
+        self.values
+            .get_index(key.index())
+            .expect("key must reference an interned value")
+    }
+}
+
+/// Interner for callers that already use cheap, stable, interned values.
+pub struct IdentityInterner<T> {
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<T> Default for IdentityInterner<T> {
+    fn default() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T: Clone + Eq + Hash + fmt::Debug> SpaceInterner for IdentityInterner<T> {
+    type Item = T;
+    type Key = T;
+    type Ref<'a>
+        = T
+    where
+        T: 'a;
+
+    fn intern(&mut self, item: Self::Item) -> Self::Key {
+        item
+    }
+
+    fn get<'a>(&'a self, key: &Self::Key) -> Self::Ref<'a> {
+        key.clone()
     }
 }
 
@@ -111,8 +182,17 @@ impl<T, E> Space<T, E> {
         self.id == EMPTY_SPACE_ID
     }
 
-    /// Returns a borrowed view of the space shape using the owning context.
-    pub fn kind<'a>(self, context: &'a SpaceContext<T, E>) -> SpaceKind<'a, T, E> {
+    /// Returns a resolved view of the space shape using the owning context.
+    pub fn kind<'a, TI, EI>(
+        self,
+        context: &'a SpaceContext<T, E, TI, EI>,
+    ) -> SpaceKind<'a, T, E, TI::Ref<'a>, EI::Ref<'a>>
+    where
+        T: Eq + Hash,
+        E: Eq + Hash,
+        TI: SpaceInterner<Item = T>,
+        EI: SpaceInterner<Item = E>,
+    {
         context.kind(self)
     }
 }
@@ -126,48 +206,51 @@ impl<T, E> Clone for Space<T, E> {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
-enum SpaceNode<T, E> {
+enum SpaceNode<T, E, TK, EK> {
     Type {
-        value_type: Type,
+        value_type: TK,
         introduced_by_decomposition: bool,
     },
     Product {
-        value_type: Type,
-        extractor: Extractor,
+        value_type: TK,
+        extractor: EK,
         parameters: Box<[Space<T, E>]>,
     },
     Union(Box<[Space<T, E>]>),
 }
 
+type InternedSpaceNode<T, E, TI, EI> =
+    SpaceNode<T, E, <TI as SpaceInterner>::Key, <EI as SpaceInterner>::Key>;
+
 /// Read-only metadata for a type-based space.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TypeSpace<'a, T> {
+pub struct TypeSpace<TRef> {
     /// The type represented by the space.
-    pub value_type: &'a T,
+    pub value_type: TRef,
     /// Whether the space was introduced by type decomposition.
     pub introduced_by_decomposition: bool,
 }
 
 /// Read-only metadata for an extractor or constructor space.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProductSpace<'a, T, E> {
+pub struct ProductSpace<'a, T, E, TRef, ERef> {
     /// The type represented by the space.
-    pub value_type: &'a T,
+    pub value_type: TRef,
     /// The extractor or constructor identity.
-    pub extractor: &'a E,
+    pub extractor: ERef,
     /// Subspaces matched for the extractor parameters.
     pub parameters: &'a [Space<T, E>],
 }
 
-/// Borrowed view over a [`Space`] value.
+/// Resolved view over a [`Space`] value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SpaceKind<'a, T, E> {
+pub enum SpaceKind<'a, T, E, TRef = &'a T, ERef = &'a E> {
     /// The empty set.
     Empty,
     /// All values that inhabit an implementation-defined type.
-    Type(TypeSpace<'a, T>),
+    Type(TypeSpace<TRef>),
     /// Values accepted by an extractor with parameter subspaces.
-    Product(ProductSpace<'a, T, E>),
+    Product(ProductSpace<'a, T, E, TRef, ERef>),
     /// The union of multiple spaces.
     Union(&'a [Space<T, E>]),
 }
@@ -189,17 +272,48 @@ impl fmt::Display for SpaceLookupError {
 impl Error for SpaceLookupError {}
 
 /// Interner and storage for space nodes.
-pub struct SpaceContext<T, E> {
-    types: IndexSet<T>,
-    extractors: IndexSet<E>,
-    nodes: IndexSet<SpaceNode<T, E>>,
+pub struct SpaceContext<T, E, TI = DedupInterner<T>, EI = DedupInterner<E>>
+where
+    TI: SpaceInterner<Item = T>,
+    EI: SpaceInterner<Item = E>,
+{
+    types: TI,
+    extractors: EI,
+    nodes: IndexSet<InternedSpaceNode<T, E, TI, EI>>,
 }
 
-impl<T, E> SpaceContext<T, E> {
+/// A [`SpaceContext`] that treats caller-provided type and extractor values as interned keys.
+pub type PreInternedSpaceContext<T, E> =
+    SpaceContext<T, E, IdentityInterner<T>, IdentityInterner<E>>;
+
+impl<T, E, TI, EI> SpaceContext<T, E, TI, EI>
+where
+    T: Eq + Hash,
+    E: Eq + Hash,
+    TI: SpaceInterner<Item = T> + Default,
+    EI: SpaceInterner<Item = E> + Default,
+{
     /// Creates a new empty context.
     #[inline]
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+impl<T, E, TI, EI> SpaceContext<T, E, TI, EI>
+where
+    T: Eq + Hash,
+    E: Eq + Hash,
+    TI: SpaceInterner<Item = T>,
+    EI: SpaceInterner<Item = E>,
+{
+    /// Creates a context from explicit type and extractor interners.
+    pub fn with_interners(type_interner: TI, extractor_interner: EI) -> Self {
+        Self {
+            types: type_interner,
+            extractors: extractor_interner,
+            nodes: IndexSet::default(),
+        }
     }
 
     /// Returns the empty space for this context.
@@ -208,28 +322,31 @@ impl<T, E> SpaceContext<T, E> {
         Space::empty()
     }
 
-    /// Returns a borrowed view of a space.
+    /// Returns a resolved view of a space.
     ///
     /// # Panics
     ///
     /// Panics when `space` is non-empty and its id is not interned in this
     /// context.
-    pub fn kind(&self, space: Space<T, E>) -> SpaceKind<'_, T, E> {
+    pub fn kind(&self, space: Space<T, E>) -> SpaceKind<'_, T, E, TI::Ref<'_>, EI::Ref<'_>> {
         self.try_kind(space)
             .expect("space id must reference a node in this context")
     }
 
-    /// Returns a borrowed view of a space without panicking on unknown ids.
+    /// Returns a resolved view of a space without panicking on unknown ids.
     ///
     /// This detects non-empty ids that are not interned in this context.
-    pub fn try_kind(&self, space: Space<T, E>) -> Result<SpaceKind<'_, T, E>, SpaceLookupError> {
+    pub fn try_kind(
+        &self,
+        space: Space<T, E>,
+    ) -> Result<SpaceKind<'_, T, E, TI::Ref<'_>, EI::Ref<'_>>, SpaceLookupError> {
         match self.lookup_node(space)? {
             None => Ok(SpaceKind::Empty),
             Some(SpaceNode::Type {
                 value_type,
                 introduced_by_decomposition,
             }) => Ok(SpaceKind::Type(TypeSpace {
-                value_type: self.type_by_id(*value_type),
+                value_type: self.type_by_key(value_type),
                 introduced_by_decomposition: *introduced_by_decomposition,
             })),
             Some(SpaceNode::Product {
@@ -237,8 +354,8 @@ impl<T, E> SpaceContext<T, E> {
                 extractor,
                 parameters,
             }) => Ok(SpaceKind::Product(ProductSpace {
-                value_type: self.type_by_id(*value_type),
-                extractor: self.extractor_by_id(*extractor),
+                value_type: self.type_by_key(value_type),
+                extractor: self.extractor_by_key(extractor),
                 parameters,
             })),
             Some(SpaceNode::Union(spaces)) => Ok(SpaceKind::Union(spaces)),
@@ -248,7 +365,7 @@ impl<T, E> SpaceContext<T, E> {
     fn lookup_node(
         &self,
         space: Space<T, E>,
-    ) -> Result<Option<&SpaceNode<T, E>>, SpaceLookupError> {
+    ) -> Result<Option<&InternedSpaceNode<T, E, TI, EI>>, SpaceLookupError> {
         let Some(index) = space.node_index() else {
             return Ok(None);
         };
@@ -259,35 +376,41 @@ impl<T, E> SpaceContext<T, E> {
             .map(Some)
     }
 
-    fn node(&self, space: Space<T, E>) -> Option<&SpaceNode<T, E>> {
+    fn node(&self, space: Space<T, E>) -> Option<&InternedSpaceNode<T, E, TI, EI>> {
         self.lookup_node(space)
             .expect("space id must reference a node in this context")
     }
 
-    fn type_by_id(&self, id: Type) -> &T {
-        self.types
-            .get_index(id.index())
-            .expect("type id must reference an interned type")
+    fn type_by_key(&self, key: &TI::Key) -> TI::Ref<'_> {
+        self.types.get(key)
     }
 
-    fn extractor_by_id(&self, id: Extractor) -> &E {
-        self.extractors
-            .get_index(id.index())
-            .expect("extractor id must reference an interned extractor")
+    fn extractor_by_key(&self, key: &EI::Key) -> EI::Ref<'_> {
+        self.extractors.get(key)
     }
 }
 
-impl<T, E> Default for SpaceContext<T, E> {
+impl<T, E, TI, EI> Default for SpaceContext<T, E, TI, EI>
+where
+    TI: SpaceInterner<Item = T> + Default,
+    EI: SpaceInterner<Item = E> + Default,
+{
     fn default() -> Self {
         Self {
-            types: IndexSet::default(),
-            extractors: IndexSet::default(),
+            types: TI::default(),
+            extractors: EI::default(),
             nodes: IndexSet::default(),
         }
     }
 }
 
-impl<T: Eq + Hash, E: Eq + Hash> SpaceContext<T, E> {
+impl<T, E, TI, EI> SpaceContext<T, E, TI, EI>
+where
+    T: Eq + Hash,
+    E: Eq + Hash,
+    TI: SpaceInterner<Item = T>,
+    EI: SpaceInterner<Item = E>,
+{
     /// Returns a type space that may be decomposed by the engine.
     pub fn of_type(&mut self, value_type: T) -> Space<T, E> {
         let value_type = self.intern_type_value(value_type);
@@ -327,19 +450,17 @@ impl<T: Eq + Hash, E: Eq + Hash> SpaceContext<T, E> {
         self.union_from_members(members)
     }
 
-    fn intern_type_value(&mut self, value_type: T) -> Type {
-        let (index, _) = self.types.insert_full(value_type);
-        Type::from_index(index)
+    fn intern_type_value(&mut self, value_type: T) -> TI::Key {
+        self.types.intern(value_type)
     }
 
-    fn intern_extractor_value(&mut self, extractor: E) -> Extractor {
-        let (index, _) = self.extractors.insert_full(extractor);
-        Extractor::from_index(index)
+    fn intern_extractor_value(&mut self, extractor: E) -> EI::Key {
+        self.extractors.intern(extractor)
     }
 
     fn intern_type_id(
         &mut self,
-        value_type: Type,
+        value_type: TI::Key,
         introduced_by_decomposition: bool,
     ) -> Space<T, E> {
         self.intern_node(SpaceNode::Type {
@@ -350,8 +471,8 @@ impl<T: Eq + Hash, E: Eq + Hash> SpaceContext<T, E> {
 
     fn intern_product_ids(
         &mut self,
-        value_type: Type,
-        extractor: Extractor,
+        value_type: TI::Key,
+        extractor: EI::Key,
         parameters: Vec<Space<T, E>>,
     ) -> Space<T, E> {
         self.intern_node(SpaceNode::Product {
@@ -361,7 +482,7 @@ impl<T: Eq + Hash, E: Eq + Hash> SpaceContext<T, E> {
         })
     }
 
-    fn intern_node(&mut self, node: SpaceNode<T, E>) -> Space<T, E> {
+    fn intern_node(&mut self, node: InternedSpaceNode<T, E, TI, EI>) -> Space<T, E> {
         let (index, _) = self.nodes.insert_full(node);
         Space::from_node_index(index)
     }
@@ -474,11 +595,15 @@ pub trait SpaceOperations {
     }
 
     /// Returns `true` when a flattened counterexample is satisfiable.
-    fn is_satisfiable(
+    fn is_satisfiable<TI, EI>(
         &self,
-        _context: &SpaceContext<Self::Type, Self::Extractor>,
+        _context: &SpaceContext<Self::Type, Self::Extractor, TI, EI>,
         _space: Space<Self::Type, Self::Extractor>,
-    ) -> bool {
+    ) -> bool
+    where
+        TI: SpaceInterner<Item = Self::Type>,
+        EI: SpaceInterner<Item = Self::Extractor>,
+    {
         true
     }
 }
@@ -529,11 +654,15 @@ impl<O: SpaceOperations + ?Sized> SpaceOperations for &O {
         (**self).allow_right_hand_decomposition(value_type)
     }
 
-    fn is_satisfiable(
+    fn is_satisfiable<TI, EI>(
         &self,
-        context: &SpaceContext<Self::Type, Self::Extractor>,
+        context: &SpaceContext<Self::Type, Self::Extractor, TI, EI>,
         space: Space<Self::Type, Self::Extractor>,
-    ) -> bool {
+    ) -> bool
+    where
+        TI: SpaceInterner<Item = Self::Type>,
+        EI: SpaceInterner<Item = Self::Extractor>,
+    {
         (**self).is_satisfiable(context, space)
     }
 }
@@ -656,43 +785,73 @@ impl<T, E> MatchAnalysis<T, E> {
 }
 
 /// Stateful engine for space algebra operations.
-pub struct SpaceEngine<'a, O: SpaceOperations> {
+pub struct SpaceEngine<
+    'a,
+    O: SpaceOperations,
+    TI: SpaceInterner<Item = <O as SpaceOperations>::Type> = DedupInterner<
+        <O as SpaceOperations>::Type,
+    >,
+    EI: SpaceInterner<Item = <O as SpaceOperations>::Extractor> = DedupInterner<
+        <O as SpaceOperations>::Extractor,
+    >,
+> {
     operations: O,
-    context: &'a mut SpaceContext<O::Type, O::Extractor>,
-    caches: Caches<O>,
+    context: &'a mut SpaceContext<O::Type, O::Extractor, TI, EI>,
+    caches: Caches<O, TI, EI>,
 }
 
 /// Checks a match expression without explicitly constructing a [`SpaceEngine`].
-pub fn check_match<O: SpaceOperations>(
+pub fn check_match<O, TI, EI>(
     operations: O,
-    context: &mut SpaceContext<O::Type, O::Extractor>,
+    context: &mut SpaceContext<O::Type, O::Extractor, TI, EI>,
     match_input: &MatchInput<O::Type, O::Extractor>,
-) -> MatchAnalysis<O::Type, O::Extractor> {
+) -> MatchAnalysis<O::Type, O::Extractor>
+where
+    O: SpaceOperations,
+    TI: SpaceInterner<Item = O::Type>,
+    EI: SpaceInterner<Item = O::Extractor>,
+{
     let mut engine = SpaceEngine::new(operations, context);
     engine.analyze_match(match_input)
 }
 
 type EngineSpace<O> = Space<<O as SpaceOperations>::Type, <O as SpaceOperations>::Extractor>;
 
-struct Caches<O: SpaceOperations> {
+struct Caches<
+    O: SpaceOperations,
+    TI: SpaceInterner<Item = O::Type>,
+    EI: SpaceInterner<Item = O::Extractor>,
+> {
     simplified_spaces: HashMap<EngineSpace<O>, EngineSpace<O>>,
     subspace_results: HashMap<(EngineSpace<O>, EngineSpace<O>), bool>,
-    decompositions: HashMap<Type, Decomposition<Type>>,
-    decomposed_unions: HashMap<Type, EngineSpace<O>>,
+    decompositions: HashMap<TI::Key, Decomposition<TI::Key>>,
+    decomposed_unions: HashMap<TI::Key, EngineSpace<O>>,
+    _marker: PhantomData<fn() -> EI>,
 }
 
-impl<O: SpaceOperations> Default for Caches<O> {
+impl<O, TI, EI> Default for Caches<O, TI, EI>
+where
+    O: SpaceOperations,
+    TI: SpaceInterner<Item = O::Type>,
+    EI: SpaceInterner<Item = O::Extractor>,
+{
     fn default() -> Self {
         Self {
             simplified_spaces: HashMap::default(),
             subspace_results: HashMap::default(),
             decompositions: HashMap::default(),
             decomposed_unions: HashMap::default(),
+            _marker: PhantomData,
         }
     }
 }
 
-impl<O: SpaceOperations> Caches<O> {
+impl<O, TI, EI> Caches<O, TI, EI>
+where
+    O: SpaceOperations,
+    TI: SpaceInterner<Item = O::Type>,
+    EI: SpaceInterner<Item = O::Extractor>,
+{
     fn clear(&mut self) {
         self.simplified_spaces.clear();
         self.subspace_results.clear();
@@ -706,9 +865,17 @@ struct CoveredArm<S> {
     covered_space: S,
 }
 
-impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
+impl<'a, O, TI, EI> SpaceEngine<'a, O, TI, EI>
+where
+    O: SpaceOperations,
+    TI: SpaceInterner<Item = O::Type>,
+    EI: SpaceInterner<Item = O::Extractor>,
+{
     /// Creates a new engine for an operations implementation.
-    pub fn new(operations: O, context: &'a mut SpaceContext<O::Type, O::Extractor>) -> Self {
+    pub fn new(
+        operations: O,
+        context: &'a mut SpaceContext<O::Type, O::Extractor, TI, EI>,
+    ) -> Self {
         Self {
             operations,
             context,
@@ -722,7 +889,7 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
     }
 
     /// Returns the space context used by the engine.
-    pub fn context(&self) -> &SpaceContext<O::Type, O::Extractor> {
+    pub fn context(&self) -> &SpaceContext<O::Type, O::Extractor, TI, EI> {
         self.context
     }
 
@@ -732,31 +899,35 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
     }
 
     #[inline]
-    fn ty(&self, id: Type) -> &O::Type {
-        self.context.type_by_id(id)
+    fn type_ref(&self, key: &TI::Key) -> TI::Ref<'_> {
+        self.context.type_by_key(key)
     }
 
     #[inline]
-    fn extractor_ref(&self, id: Extractor) -> &O::Extractor {
-        self.context.extractor_by_id(id)
+    fn extractor_ref(&self, key: &EI::Key) -> EI::Ref<'_> {
+        self.context.extractor_by_key(key)
     }
 
     #[inline]
-    fn is_subtype_id(&self, left: Type, right: Type) -> bool {
-        self.operations.is_subtype(self.ty(left), self.ty(right))
+    fn is_subtype_id(&self, left: &TI::Key, right: &TI::Key) -> bool {
+        let left = self.type_ref(left);
+        let right = self.type_ref(right);
+        self.operations.is_subtype(left.borrow(), right.borrow())
     }
 
     #[inline]
-    fn extractors_are_equivalent_id(&self, left: Extractor, right: Extractor) -> bool {
+    fn extractors_are_equivalent_id(&self, left: &EI::Key, right: &EI::Key) -> bool {
+        let left = self.extractor_ref(left);
+        let right = self.extractor_ref(right);
         self.operations
-            .extractors_are_equivalent(self.extractor_ref(left), self.extractor_ref(right))
+            .extractors_are_equivalent(left.borrow(), right.borrow())
     }
 
     #[inline]
     fn same_product_shape(
         &self,
-        left_extractor: Extractor,
-        right_extractor: Extractor,
+        left_extractor: &EI::Key,
+        right_extractor: &EI::Key,
         left_arity: usize,
         right_arity: usize,
     ) -> bool {
@@ -777,7 +948,7 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
     #[inline]
     fn make_type_space_from_id(
         &mut self,
-        value_type: Type,
+        value_type: TI::Key,
         introduced_by_decomposition: bool,
     ) -> EngineSpace<O> {
         self.context
@@ -787,8 +958,8 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
     #[inline]
     fn make_product_space_from_ids(
         &mut self,
-        value_type: Type,
-        extractor: Extractor,
+        value_type: TI::Key,
+        extractor: EI::Key,
         parameters: Vec<EngineSpace<O>>,
     ) -> EngineSpace<O> {
         self.context
@@ -838,10 +1009,10 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
 
     fn filtered_decomposed_type_union(
         &mut self,
-        value_type: Type,
+        value_type: TI::Key,
         covering_space: EngineSpace<O>,
     ) -> Option<EngineSpace<O>> {
-        let parts = match self.decomposition_for_type(value_type) {
+        let parts = match self.decomposition_for_type(value_type.clone()) {
             Decomposition::NotDecomposable => return None,
             Decomposition::Empty => return Some(self.empty_space()),
             Decomposition::Parts(parts) => parts.clone(),
@@ -860,29 +1031,33 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
 
     fn lifted_product_space(
         &mut self,
-        scrutinee_type: Type,
-        accepted_type: Type,
-        extractor: Extractor,
+        scrutinee_type: TI::Key,
+        accepted_type: TI::Key,
+        extractor: EI::Key,
         arity: usize,
-        result_value_type: Type,
+        result_value_type: TI::Key,
     ) -> Option<EngineSpace<O>> {
-        if !self.is_subtype_id(scrutinee_type, accepted_type) {
+        if !self.is_subtype_id(&scrutinee_type, &accepted_type) {
             return None;
         }
 
         let parameter_types = {
-            let extractor_ref = self.extractor_ref(extractor);
-            let scrutinee_type_ref = self.ty(scrutinee_type);
+            let extractor_ref = self.extractor_ref(&extractor);
+            let scrutinee_type_ref = self.type_ref(&scrutinee_type);
 
-            if !self
-                .operations
-                .extractor_covers_type(extractor_ref, scrutinee_type_ref, arity)
-            {
+            if !self.operations.extractor_covers_type(
+                extractor_ref.borrow(),
+                scrutinee_type_ref.borrow(),
+                arity,
+            ) {
                 return None;
             }
 
-            self.operations
-                .extractor_parameter_types(extractor_ref, scrutinee_type_ref, arity)
+            self.operations.extractor_parameter_types(
+                extractor_ref.borrow(),
+                scrutinee_type_ref.borrow(),
+                arity,
+            )
         };
 
         debug_assert_eq!(
@@ -908,7 +1083,7 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
         let simplified_space = match self.context.node(space) {
             None => self.empty_space(),
             Some(SpaceNode::Type { value_type, .. }) => {
-                let value_type = *value_type;
+                let value_type = value_type.clone();
                 if self.type_is_uninhabited(value_type) {
                     self.empty_space()
                 } else {
@@ -916,8 +1091,8 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                 }
             }
             Some(SpaceNode::Product { value_type, .. }) => {
-                let value_type = *value_type;
-                if self.type_is_uninhabited(value_type) {
+                let value_type = value_type.clone();
+                if self.type_is_uninhabited(value_type.clone()) {
                     self.empty_space()
                 } else {
                     let (extractor, parameters) = match self.context.node(space) {
@@ -925,7 +1100,7 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                             extractor,
                             parameters,
                             ..
-                        }) => (*extractor, parameters.to_vec()),
+                        }) => (extractor.clone(), parameters.to_vec()),
                         _ => unreachable!("space node shape changed unexpectedly"),
                     };
 
@@ -1049,12 +1224,12 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                     ..
                 }),
             ) => {
-                let left_type_id = *left_type_id;
-                let right_type_id = *right_type_id;
+                let left_type_id = left_type_id.clone();
+                let right_type_id = right_type_id.clone();
 
-                if self.is_subtype_id(left_type_id, right_type_id) {
+                if self.is_subtype_id(&left_type_id, &right_type_id) {
                     left_space
-                } else if self.is_subtype_id(right_type_id, left_type_id) {
+                } else if self.is_subtype_id(&right_type_id, &left_type_id) {
                     right_space
                 } else {
                     self.build_atomic_intersection(left_type_id, right_type_id, left_space)
@@ -1070,12 +1245,12 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                     ..
                 }),
             ) => {
-                let left_type_id = *left_type_id;
-                let right_type_id = *right_type_id;
+                let left_type_id = left_type_id.clone();
+                let right_type_id = right_type_id.clone();
 
-                if self.is_subtype_id(right_type_id, left_type_id) {
+                if self.is_subtype_id(&right_type_id, &left_type_id) {
                     right_space
-                } else if self.is_subtype_id(left_type_id, right_type_id) {
+                } else if self.is_subtype_id(&left_type_id, &right_type_id) {
                     left_space
                 } else {
                     self.build_atomic_intersection(left_type_id, right_type_id, right_space)
@@ -1091,11 +1266,11 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                     ..
                 }),
             ) => {
-                let left_type_id = *left_type_id;
-                let right_type_id = *right_type_id;
+                let left_type_id = left_type_id.clone();
+                let right_type_id = right_type_id.clone();
 
-                if self.is_subtype_id(left_type_id, right_type_id)
-                    || self.is_subtype_id(right_type_id, left_type_id)
+                if self.is_subtype_id(&left_type_id, &right_type_id)
+                    || self.is_subtype_id(&right_type_id, &left_type_id)
                 {
                     left_space
                 } else {
@@ -1114,13 +1289,13 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                     parameters: right_parameters,
                 }),
             ) => {
-                let value_type = *value_type;
-                let extractor = *extractor;
-                let right_value_type = *right_value_type;
+                let value_type = value_type.clone();
+                let extractor = extractor.clone();
+                let right_value_type = right_value_type.clone();
 
                 if !self.same_product_shape(
-                    extractor,
-                    *right_extractor,
+                    &extractor,
+                    right_extractor,
                     left_parameters.len(),
                     right_parameters.len(),
                 ) {
@@ -1170,7 +1345,7 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
             (_, Some(SpaceNode::Union(members))) => {
                 let members = members.to_vec();
                 let left_type = match self.context.node(left_space) {
-                    Some(SpaceNode::Type { value_type, .. }) => Some(*value_type),
+                    Some(SpaceNode::Type { value_type, .. }) => Some(value_type.clone()),
                     _ => None,
                 };
 
@@ -1201,15 +1376,15 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                     ..
                 }),
             ) => {
-                let left_type_id = *left_type_id;
-                let right_type_id = *right_type_id;
+                let left_type_id = left_type_id.clone();
+                let right_type_id = right_type_id.clone();
 
-                if self.is_subtype_id(left_type_id, right_type_id) {
+                if self.is_subtype_id(&left_type_id, &right_type_id) {
                     self.empty_space()
-                } else if self.is_decomposable(left_type_id) {
+                } else if self.is_decomposable(left_type_id.clone()) {
                     let decomposed_union = self.decomposed_type_union(left_type_id);
                     self.subtract(decomposed_union, right_space)
-                } else if self.is_decomposable(right_type_id) {
+                } else if self.is_decomposable(right_type_id.clone()) {
                     let decomposed_union = self.decomposed_type_union(right_type_id);
                     self.subtract(left_space, decomposed_union)
                 } else {
@@ -1227,17 +1402,17 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                     parameters: right_parameters,
                 }),
             ) => {
-                let left_type_id = *left_type_id;
+                let left_type_id = left_type_id.clone();
 
                 if let Some(lifted_product_space) = self.lifted_product_space(
-                    left_type_id,
-                    *right_value_type,
-                    *right_extractor,
+                    left_type_id.clone(),
+                    right_value_type.clone(),
+                    right_extractor.clone(),
                     right_parameters.len(),
-                    left_type_id,
+                    left_type_id.clone(),
                 ) {
                     self.subtract(lifted_product_space, right_space)
-                } else if self.is_decomposable(left_type_id) {
+                } else if self.is_decomposable(left_type_id.clone()) {
                     let decomposed_union = self.decomposed_type_union(left_type_id);
                     self.subtract(decomposed_union, right_space)
                 } else {
@@ -1254,16 +1429,16 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                     ..
                 }),
             ) => {
-                let left_type_id = *left_type_id;
-                let right_type_id = *right_type_id;
+                let left_type_id = left_type_id.clone();
+                let right_type_id = right_type_id.clone();
 
-                if self.is_subtype_id(left_type_id, right_type_id) {
+                if self.is_subtype_id(&left_type_id, &right_type_id) {
                     self.empty_space()
                 } else {
                     let simplified_left = self.simplify(left_space);
                     if simplified_left.is_empty() {
                         self.empty_space()
-                    } else if self.is_decomposable(right_type_id) {
+                    } else if self.is_decomposable(right_type_id.clone()) {
                         let decomposed_union = self.decomposed_type_union(right_type_id);
                         self.subtract(simplified_left, decomposed_union)
                     } else {
@@ -1283,12 +1458,12 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                     ..
                 }),
             ) => {
-                let value_type = *value_type;
-                let extractor = *extractor;
+                let value_type = value_type.clone();
+                let extractor = extractor.clone();
 
                 if !self.same_product_shape(
-                    extractor,
-                    *right_extractor,
+                    &extractor,
+                    right_extractor,
                     left_parameters.len(),
                     right_parameters.len(),
                 ) {
@@ -1339,8 +1514,8 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                             for &flattened_space in flattened_spaces {
                                 scratch[parameter_index] = flattened_space;
                                 remaining_spaces.push(self.make_product_space_from_ids(
-                                    value_type,
-                                    extractor,
+                                    value_type.clone(),
+                                    extractor.clone(),
                                     scratch.clone(),
                                 ));
                             }
@@ -1384,11 +1559,11 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
         self.simplify(remainder)
     }
 
-    fn decomposition_for_type(&mut self, value_type: Type) -> &Decomposition<Type> {
+    fn decomposition_for_type(&mut self, value_type: TI::Key) -> &Decomposition<TI::Key> {
         if self.caches.decompositions.get(&value_type).is_none() {
             let decomposition = {
-                let value_type_ref = self.ty(value_type);
-                self.operations.decompose_type(value_type_ref)
+                let value_type_ref = self.type_ref(&value_type);
+                self.operations.decompose_type(value_type_ref.borrow())
             };
 
             let decomposition = match decomposition {
@@ -1409,7 +1584,9 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                 }
             };
 
-            self.caches.decompositions.insert(value_type, decomposition);
+            self.caches
+                .decompositions
+                .insert(value_type.clone(), decomposition);
         }
 
         self.caches
@@ -1418,23 +1595,23 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
             .expect("decomposition cache entry must exist")
     }
 
-    fn is_decomposable(&mut self, value_type: Type) -> bool {
+    fn is_decomposable(&mut self, value_type: TI::Key) -> bool {
         self.decomposition_for_type(value_type).is_decomposable()
     }
 
-    fn type_is_uninhabited(&mut self, value_type: Type) -> bool {
+    fn type_is_uninhabited(&mut self, value_type: TI::Key) -> bool {
         matches!(
             self.decomposition_for_type(value_type),
             Decomposition::Empty,
         )
     }
 
-    fn decomposed_type_union(&mut self, value_type: Type) -> EngineSpace<O> {
+    fn decomposed_type_union(&mut self, value_type: TI::Key) -> EngineSpace<O> {
         if let Some(&cached_union) = self.caches.decomposed_unions.get(&value_type) {
             return cached_union;
         }
 
-        let decomposed_union = match self.decomposition_for_type(value_type) {
+        let decomposed_union = match self.decomposition_for_type(value_type.clone()) {
             Decomposition::NotDecomposable | Decomposition::Empty => self.empty_space(),
             Decomposition::Parts(parts) => {
                 let parts = parts.clone();
@@ -1454,15 +1631,15 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
 
     fn build_atomic_intersection(
         &mut self,
-        left: Type,
-        right: Type,
+        left: TI::Key,
+        right: TI::Key,
         preferred_space: EngineSpace<O>,
     ) -> EngineSpace<O> {
         let intersection = {
-            let left_type = self.ty(left);
-            let right_type = self.ty(right);
+            let left_type = self.type_ref(&left);
+            let right_type = self.type_ref(&right);
             self.operations
-                .intersect_atomic_types(left_type, right_type)
+                .intersect_atomic_types(left_type.borrow(), right_type.borrow())
         };
 
         match intersection {
@@ -1481,7 +1658,7 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                         ..
                     }) => self.make_product_space_from_ids(
                         intersection_type,
-                        *extractor,
+                        extractor.clone(),
                         parameters.to_vec(),
                     ),
                     None | Some(SpaceNode::Union(_)) => {
@@ -1508,8 +1685,8 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                     extractor,
                     parameters,
                 }) => {
-                    let value_type = *value_type;
-                    let extractor = *extractor;
+                    let value_type = value_type.clone();
+                    let extractor = extractor.clone();
                     let parameters = parameters.to_vec();
                     self.flatten_product(value_type, extractor, parameters, flattened);
                 }
@@ -1523,8 +1700,8 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
 
     fn flatten_product(
         &mut self,
-        value_type: Type,
-        extractor: Extractor,
+        value_type: TI::Key,
+        extractor: EI::Key,
         parameters: Vec<EngineSpace<O>>,
         flattened: &mut Vec<EngineSpace<O>>,
     ) {
@@ -1550,8 +1727,8 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
 
         loop {
             flattened.push(self.make_product_space_from_ids(
-                value_type,
-                extractor,
+                value_type.clone(),
+                extractor.clone(),
                 current.clone(),
             ));
 
@@ -1586,17 +1763,17 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
     fn estimated_space_size_with_visited(
         &mut self,
         space: EngineSpace<O>,
-        visited_types: &mut HashSet<Type>,
+        visited_types: &mut HashSet<TI::Key>,
     ) -> usize {
         match self.context.node(space) {
             None => 0,
             Some(SpaceNode::Type { value_type, .. }) => {
-                let value_type = *value_type;
-                if !visited_types.insert(value_type) {
+                let value_type = value_type.clone();
+                if !visited_types.insert(value_type.clone()) {
                     return 1;
                 }
 
-                let estimate = match self.decomposition_for_type(value_type) {
+                let estimate = match self.decomposition_for_type(value_type.clone()) {
                     Decomposition::NotDecomposable => 1,
                     Decomposition::Empty => 0,
                     Decomposition::Parts(parts) => {
@@ -1852,7 +2029,7 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                 }),
                 Some(SpaceNode::Union(members)),
             ) => {
-                let left_type = *left_type;
+                let left_type = left_type.clone();
                 let members = members.to_vec();
 
                 for member in members {
@@ -1880,20 +2057,21 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                     ..
                 }),
             ) => {
-                let left_type_id = *left_type_id;
-                let right_type_id = *right_type_id;
-                let left_is_subtype = self.is_subtype_id(left_type_id, right_type_id);
+                let left_type_id = left_type_id.clone();
+                let right_type_id = right_type_id.clone();
+                let left_is_subtype = self.is_subtype_id(&left_type_id, &right_type_id);
                 let allow_right_decomposition = {
-                    let right_type = self.ty(right_type_id);
-                    self.operations.allow_right_hand_decomposition(right_type)
+                    let right_type = self.type_ref(&right_type_id);
+                    self.operations
+                        .allow_right_hand_decomposition(right_type.borrow())
                 };
 
                 if left_is_subtype {
                     true
-                } else if self.is_decomposable(left_type_id) {
+                } else if self.is_decomposable(left_type_id.clone()) {
                     let decomposed_union = self.decomposed_type_union(left_type_id);
                     self.is_subspace(decomposed_union, right_space)
-                } else if allow_right_decomposition && self.is_decomposable(right_type_id) {
+                } else if allow_right_decomposition && self.is_decomposable(right_type_id.clone()) {
                     let decomposed_union = self.decomposed_type_union(right_type_id);
                     self.is_subspace(left_space, decomposed_union)
                 } else {
@@ -1909,7 +2087,7 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                     value_type: right_type_id,
                     ..
                 }),
-            ) => self.is_subtype_id(*left_type_id, *right_type_id),
+            ) => self.is_subtype_id(left_type_id, right_type_id),
             (
                 Some(SpaceNode::Type {
                     value_type: left_type_id,
@@ -1921,18 +2099,18 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                     parameters: right_parameters,
                 }),
             ) => {
-                let left_type_id = *left_type_id;
-                let right_value_type = *right_value_type;
+                let left_type_id = left_type_id.clone();
+                let right_value_type = right_value_type.clone();
 
                 if let Some(lifted_product_space) = self.lifted_product_space(
-                    left_type_id,
-                    right_value_type,
-                    *right_extractor,
+                    left_type_id.clone(),
+                    right_value_type.clone(),
+                    right_extractor.clone(),
                     right_parameters.len(),
-                    right_value_type,
+                    right_value_type.clone(),
                 ) {
                     self.is_subspace(lifted_product_space, right_space)
-                } else if self.is_decomposable(left_type_id) {
+                } else if self.is_decomposable(left_type_id.clone()) {
                     let decomposed_union = self.decomposed_type_union(left_type_id);
                     self.is_subspace(decomposed_union, right_space)
                 } else {
@@ -1952,8 +2130,8 @@ impl<'a, O: SpaceOperations> SpaceEngine<'a, O> {
                 }),
             ) => {
                 if !self.same_product_shape(
-                    *left_extractor,
-                    *right_extractor,
+                    left_extractor,
+                    right_extractor,
                     left_parameters.len(),
                     right_parameters.len(),
                 ) {

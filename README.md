@@ -18,6 +18,13 @@ handles scoped to that context:
 Use `Space::kind(&context)` or `SpaceContext::kind(space)` when you need to
 inspect whether a value is empty, type-based, product-based, or a union.
 
+By default, `SpaceContext<T, E>` deduplicates full type and extractor values.
+If your implementation already has cheap interned IDs, use
+`PreInternedSpaceContext<T, E>` to store those IDs directly and avoid the extra
+type/extractor interning tables. For mixed setups, construct a context with
+`SpaceContext::with_interners(...)` and explicit `DedupInterner` or
+`IdentityInterner` values.
+
 With that model, exhaustivity becomes a containment question:
 
 - Is the scrutinee space a subspace of the union of all arm spaces?
