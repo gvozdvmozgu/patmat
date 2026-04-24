@@ -1,6 +1,8 @@
 use patmat::{
-    AtomicIntersection, Decomposition, Space, SpaceContext, SpaceEngine, SpaceKind, SpaceOperations,
+    AtomicIntersection, Decomposition, Space, SpaceContext, SpaceEngine, SpaceInterner, SpaceKind,
+    SpaceOperations,
 };
+use std::borrow::Borrow;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum RichType {
@@ -147,16 +149,20 @@ impl SpaceOperations for RichOperations {
         *value_type != RichType::NoRhdBool
     }
 
-    fn is_satisfiable(
+    fn is_satisfiable<TI, EI>(
         &self,
-        context: &SpaceContext<Self::Type, Self::Extractor>,
+        context: &SpaceContext<Self::Type, Self::Extractor, TI, EI>,
         space: Space<Self::Type, Self::Extractor>,
-    ) -> bool {
+    ) -> bool
+    where
+        TI: SpaceInterner<Item = Self::Type>,
+        EI: SpaceInterner<Item = Self::Extractor>,
+    {
         match space.kind(context) {
             SpaceKind::Empty => false,
-            SpaceKind::Type(kind) => *kind.value_type != RichType::Unsat,
+            SpaceKind::Type(kind) => kind.value_type.borrow() != &RichType::Unsat,
             SpaceKind::Product(kind) => {
-                *kind.value_type != RichType::Unsat
+                kind.value_type.borrow() != &RichType::Unsat
                     && kind
                         .parameters
                         .iter()
