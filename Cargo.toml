@@ -7,6 +7,10 @@ readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/gvozdvmozgu/patmat"
 
+[workspace]
+members = [".", "playground-wasm"]
+resolver = "3"
+
 [dependencies]
 foldhash = "0.2.0"
 hashbrown = "0.16"
