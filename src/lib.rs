@@ -1402,6 +1402,53 @@ where
         self.make_product_space_from_keys(value_type_key, extractor, intersected_parameters)
     }
 
+    fn intersect_type_spaces(
+        &mut self,
+        left_space: EngineSpace<O>,
+        left_type_key: TypeKey<TI>,
+        right_space: EngineSpace<O>,
+        right_type_key: TypeKey<TI>,
+    ) -> EngineSpace<O> {
+        if self.is_subtype_key(&left_type_key, &right_type_key) {
+            left_space
+        } else if self.is_subtype_key(&right_type_key, &left_type_key) {
+            right_space
+        } else {
+            self.build_atomic_intersection(left_type_key, right_type_key, left_space)
+        }
+    }
+
+    fn intersect_type_with_product(
+        &mut self,
+        type_space: EngineSpace<O>,
+        type_key: TypeKey<TI>,
+        product_space: EngineSpace<O>,
+        product_type_key: TypeKey<TI>,
+    ) -> EngineSpace<O> {
+        if self.is_subtype_key(&product_type_key, &type_key) {
+            product_space
+        } else if self.is_subtype_key(&type_key, &product_type_key) {
+            type_space
+        } else {
+            self.build_atomic_intersection(type_key, product_type_key, product_space)
+        }
+    }
+
+    fn intersect_product_with_type(
+        &mut self,
+        product_space: EngineSpace<O>,
+        product_type_key: TypeKey<TI>,
+        type_key: TypeKey<TI>,
+    ) -> EngineSpace<O> {
+        if self.is_subtype_key(&product_type_key, &type_key)
+            || self.is_subtype_key(&type_key, &product_type_key)
+        {
+            product_space
+        } else {
+            self.build_atomic_intersection(product_type_key, type_key, product_space)
+        }
+    }
+
     #[inline(always)]
     fn compute_intersection(
         &mut self,
@@ -1437,14 +1484,7 @@ where
             ) => {
                 let left_type_key = left_type_key.clone();
                 let right_type_key = right_type_key.clone();
-
-                if self.is_subtype_key(&left_type_key, &right_type_key) {
-                    left_space
-                } else if self.is_subtype_key(&right_type_key, &left_type_key) {
-                    right_space
-                } else {
-                    self.build_atomic_intersection(left_type_key, right_type_key, left_space)
-                }
+                self.intersect_type_spaces(left_space, left_type_key, right_space, right_type_key)
             }
             (
                 Some(SpaceNode::Type {
@@ -1458,14 +1498,12 @@ where
             ) => {
                 let left_type_key = left_type_key.clone();
                 let right_type_key = right_type_key.clone();
-
-                if self.is_subtype_key(&right_type_key, &left_type_key) {
-                    right_space
-                } else if self.is_subtype_key(&left_type_key, &right_type_key) {
-                    left_space
-                } else {
-                    self.build_atomic_intersection(left_type_key, right_type_key, right_space)
-                }
+                self.intersect_type_with_product(
+                    left_space,
+                    left_type_key,
+                    right_space,
+                    right_type_key,
+                )
             }
             (
                 Some(SpaceNode::Product {
@@ -1479,14 +1517,7 @@ where
             ) => {
                 let left_type_key = left_type_key.clone();
                 let right_type_key = right_type_key.clone();
-
-                if self.is_subtype_key(&left_type_key, &right_type_key)
-                    || self.is_subtype_key(&right_type_key, &left_type_key)
-                {
-                    left_space
-                } else {
-                    self.build_atomic_intersection(left_type_key, right_type_key, left_space)
-                }
+                self.intersect_product_with_type(left_space, left_type_key, right_type_key)
             }
             (
                 Some(SpaceNode::Product {
@@ -1618,6 +1649,109 @@ where
         self.build_pruned_union_from_members(remaining_spaces)
     }
 
+    fn subtract_union_members_from_space(
+        &mut self,
+        left_space: EngineSpace<O>,
+        right_space: EngineSpace<O>,
+        left_type_key: Option<TypeKey<TI>>,
+        members: Vec<EngineSpace<O>>,
+    ) -> EngineSpace<O> {
+        if let Some(filtered_left) = left_type_key
+            .and_then(|value_type| self.filtered_decomposed_type_union(value_type, right_space))
+        {
+            return self.subtract(filtered_left, right_space);
+        }
+
+        let mut remainder = left_space;
+
+        for member in members {
+            if remainder.is_empty() {
+                break;
+            }
+            remainder = self.subtract(remainder, member);
+        }
+
+        remainder
+    }
+
+    fn subtract_space_from_union_members(
+        &mut self,
+        members: Vec<EngineSpace<O>>,
+        right_space: EngineSpace<O>,
+    ) -> EngineSpace<O> {
+        let mut remainders = Vec::with_capacity(members.len());
+        for member in members {
+            remainders.push(self.subtract(member, right_space));
+        }
+        self.build_pruned_union_from_members(remainders)
+    }
+
+    fn subtract_type_from_type(
+        &mut self,
+        left_space: EngineSpace<O>,
+        left_type_key: TypeKey<TI>,
+        right_space: EngineSpace<O>,
+        right_type_key: TypeKey<TI>,
+    ) -> EngineSpace<O> {
+        if self.is_subtype_key(&left_type_key, &right_type_key) {
+            self.empty_space()
+        } else if self.is_decomposable(left_type_key.clone()) {
+            let decomposed_union = self.decomposed_type_key_union(left_type_key);
+            self.subtract(decomposed_union, right_space)
+        } else if self.is_decomposable(right_type_key.clone()) {
+            let decomposed_union = self.decomposed_type_key_union(right_type_key);
+            self.subtract(left_space, decomposed_union)
+        } else {
+            left_space
+        }
+    }
+
+    fn subtract_type_from_product(
+        &mut self,
+        left_space: EngineSpace<O>,
+        left_type_key: TypeKey<TI>,
+        right_space: EngineSpace<O>,
+        right_value_key: TypeKey<TI>,
+        right_extractor: ExtractorKey<EI>,
+        right_arity: usize,
+    ) -> EngineSpace<O> {
+        if let Some(lifted_product_space) = self.lifted_product_space(
+            left_type_key.clone(),
+            right_value_key,
+            right_extractor,
+            right_arity,
+            left_type_key.clone(),
+        ) {
+            self.subtract(lifted_product_space, right_space)
+        } else if self.is_decomposable(left_type_key.clone()) {
+            let decomposed_union = self.decomposed_type_key_union(left_type_key);
+            self.subtract(decomposed_union, right_space)
+        } else {
+            left_space
+        }
+    }
+
+    fn subtract_product_from_type(
+        &mut self,
+        left_space: EngineSpace<O>,
+        left_type_key: TypeKey<TI>,
+        right_type_key: TypeKey<TI>,
+    ) -> EngineSpace<O> {
+        if self.is_subtype_key(&left_type_key, &right_type_key) {
+            self.empty_space()
+        } else {
+            let simplified_left = self.simplify(left_space);
+            if simplified_left.is_empty() {
+                self.empty_space()
+            } else if self.is_decomposable(right_type_key.clone()) {
+                let decomposed_union = self.decomposed_type_key_union(right_type_key);
+                self.subtract(simplified_left, decomposed_union)
+            } else {
+                simplified_left
+            }
+        }
+    }
+
     #[inline(always)]
     fn compute_subtraction(
         &mut self,
@@ -1632,11 +1766,7 @@ where
             (_, None) => left_space,
             (Some(SpaceNode::Union(members)), _) => {
                 let members = members.to_vec();
-                let mut remainders = Vec::with_capacity(members.len());
-                for member in members {
-                    remainders.push(self.subtract(member, right_space));
-                }
-                self.build_pruned_union_from_members(remainders)
+                self.subtract_space_from_union_members(members, right_space)
             }
             (_, Some(SpaceNode::Union(members))) => {
                 let members = members.to_vec();
@@ -1644,23 +1774,7 @@ where
                     Some(SpaceNode::Type { value_type, .. }) => Some(value_type.clone()),
                     _ => None,
                 };
-
-                if let Some(filtered_left) = left_type.and_then(|value_type| {
-                    self.filtered_decomposed_type_union(value_type, right_space)
-                }) {
-                    return self.subtract(filtered_left, right_space);
-                }
-
-                let mut remainder = left_space;
-
-                for member in members {
-                    if remainder.is_empty() {
-                        break;
-                    }
-                    remainder = self.subtract(remainder, member);
-                }
-
-                remainder
+                self.subtract_union_members_from_space(left_space, right_space, left_type, members)
             }
             (
                 Some(SpaceNode::Type {
@@ -1674,18 +1788,7 @@ where
             ) => {
                 let left_type_key = left_type_key.clone();
                 let right_type_key = right_type_key.clone();
-
-                if self.is_subtype_key(&left_type_key, &right_type_key) {
-                    self.empty_space()
-                } else if self.is_decomposable(left_type_key.clone()) {
-                    let decomposed_union = self.decomposed_type_key_union(left_type_key);
-                    self.subtract(decomposed_union, right_space)
-                } else if self.is_decomposable(right_type_key.clone()) {
-                    let decomposed_union = self.decomposed_type_key_union(right_type_key);
-                    self.subtract(left_space, decomposed_union)
-                } else {
-                    left_space
-                }
+                self.subtract_type_from_type(left_space, left_type_key, right_space, right_type_key)
             }
             (
                 Some(SpaceNode::Type {
@@ -1699,21 +1802,14 @@ where
                 }),
             ) => {
                 let left_type_key = left_type_key.clone();
-
-                if let Some(lifted_product_space) = self.lifted_product_space(
-                    left_type_key.clone(),
+                self.subtract_type_from_product(
+                    left_space,
+                    left_type_key,
+                    right_space,
                     right_value_key.clone(),
                     right_extractor.clone(),
                     right_parameters.len(),
-                    left_type_key.clone(),
-                ) {
-                    self.subtract(lifted_product_space, right_space)
-                } else if self.is_decomposable(left_type_key.clone()) {
-                    let decomposed_union = self.decomposed_type_key_union(left_type_key);
-                    self.subtract(decomposed_union, right_space)
-                } else {
-                    left_space
-                }
+                )
             }
             (
                 Some(SpaceNode::Product {
@@ -1727,20 +1823,7 @@ where
             ) => {
                 let left_type_key = left_type_key.clone();
                 let right_type_key = right_type_key.clone();
-
-                if self.is_subtype_key(&left_type_key, &right_type_key) {
-                    self.empty_space()
-                } else {
-                    let simplified_left = self.simplify(left_space);
-                    if simplified_left.is_empty() {
-                        self.empty_space()
-                    } else if self.is_decomposable(right_type_key.clone()) {
-                        let decomposed_union = self.decomposed_type_key_union(right_type_key);
-                        self.subtract(simplified_left, decomposed_union)
-                    } else {
-                        simplified_left
-                    }
-                }
+                self.subtract_product_from_type(left_space, left_type_key, right_type_key)
             }
             (
                 Some(SpaceNode::Product {
@@ -2377,7 +2460,7 @@ where
                     right_value_key.clone(),
                     right_extractor.clone(),
                     right_parameters.len(),
-                    right_value_key.clone(),
+                    right_value_key,
                 ) {
                     self.is_subspace(lifted_product_space, right_space)
                 } else if self.is_decomposable(left_type_key.clone()) {
