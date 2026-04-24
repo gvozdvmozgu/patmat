@@ -1,1 +1,8 @@
 /target
+/playground/dist
+/playground/node_modules
+/playground/tsconfig.tsbuildinfo
+/playground-vite*.log
+/playground-wasm/pkg
+/playground-wasm/target
+/playground-wasm/.wasm-pack

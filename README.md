@@ -53,6 +53,32 @@ the `SpaceOperations` trait, which supplies:
   knowledge about inheritance, decomposability, extractors, and satisfiability
   stays in the operations implementation.
 
+## Playground
+
+The browser playground is deployed at
+<https://gvozdvmozgu.github.io/patmat/>.
+
+Local development:
+
+```sh
+wasm-pack build playground-wasm --target web
+cd playground
+npm install
+npm run dev
+```
+
+Production build:
+
+```sh
+wasm-pack build playground-wasm --target web
+cd playground
+npm install
+npm run build
+```
+
+For GitHub Pages, configure the repository's Pages source to use
+**GitHub Actions**.
+
 ## Limitations
 
 The same practical limitations called out in the paper apply here unless an
