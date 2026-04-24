@@ -1,9 +1,9 @@
 use crate::{
     SpaceInterner, SpaceOperations,
-    space::{ExtractorKey, TypeKey},
+    space::{ExtractorKey, SpaceNode, TypeKey},
 };
 
-use super::{EngineSpace, NodeSnapshot, SpaceEngine};
+use super::{EngineSpace, SpaceEngine};
 
 impl<'a, O, TI, EI> SpaceEngine<'a, O, TI, EI>
 where
@@ -113,78 +113,100 @@ where
         right_space: EngineSpace<O>,
     ) -> EngineSpace<O> {
         match (
-            self.node_snapshot(left_space),
-            self.node_snapshot(right_space),
+            self.context.node(left_space),
+            self.context.node(right_space),
         ) {
-            (NodeSnapshot::Empty, _) | (_, NodeSnapshot::Empty) => self.empty_space(),
-            (_, NodeSnapshot::Union(members)) => self
-                .map_union_members(members.to_vec(), |engine, member| {
+            (None, _) | (_, None) => self.empty_space(),
+            (_, Some(SpaceNode::Union(members))) => {
+                let members = Self::copy_space_handles(members);
+                self.map_union_members(members, |engine, member| {
                     engine.intersect(left_space, member)
-                }),
-            (NodeSnapshot::Union(members), _) => self
-                .map_union_members(members.to_vec(), |engine, member| {
+                })
+            }
+            (Some(SpaceNode::Union(members)), _) => {
+                let members = Self::copy_space_handles(members);
+                self.map_union_members(members, |engine, member| {
                     engine.intersect(member, right_space)
+                })
+            }
+            (
+                Some(SpaceNode::Type {
+                    value_type: left_type_key,
+                    ..
                 }),
-            (
-                NodeSnapshot::Type {
-                    value_type: left_type_key,
-                    ..
-                },
-                NodeSnapshot::Type {
+                Some(SpaceNode::Type {
                     value_type: right_type_key,
                     ..
-                },
-            ) => self.intersect_type_spaces(left_space, left_type_key, right_space, right_type_key),
+                }),
+            ) => {
+                let left_type_key = left_type_key.clone();
+                let right_type_key = right_type_key.clone();
+                self.intersect_type_spaces(left_space, left_type_key, right_space, right_type_key)
+            }
             (
-                NodeSnapshot::Type {
+                Some(SpaceNode::Type {
                     value_type: left_type_key,
                     ..
-                },
-                NodeSnapshot::Product {
+                }),
+                Some(SpaceNode::Product {
                     value_type: right_type_key,
                     ..
-                },
-            ) => self.intersect_type_with_product(
-                left_space,
-                left_type_key,
-                right_space,
-                right_type_key,
-            ),
+                }),
+            ) => {
+                let left_type_key = left_type_key.clone();
+                let right_type_key = right_type_key.clone();
+                self.intersect_type_with_product(
+                    left_space,
+                    left_type_key,
+                    right_space,
+                    right_type_key,
+                )
+            }
             (
-                NodeSnapshot::Product {
+                Some(SpaceNode::Product {
                     value_type: left_type_key,
                     ..
-                },
-                NodeSnapshot::Type {
+                }),
+                Some(SpaceNode::Type {
                     value_type: right_type_key,
                     ..
-                },
-            ) => self.intersect_product_with_type(left_space, left_type_key, right_type_key),
+                }),
+            ) => {
+                let left_type_key = left_type_key.clone();
+                let right_type_key = right_type_key.clone();
+                self.intersect_product_with_type(left_space, left_type_key, right_type_key)
+            }
             (
-                NodeSnapshot::Product {
+                Some(SpaceNode::Product {
                     value_type,
                     extractor,
                     parameters: left_parameters,
-                },
-                NodeSnapshot::Product {
+                }),
+                Some(SpaceNode::Product {
                     value_type: right_value_key,
                     extractor: right_extractor,
                     parameters: right_parameters,
-                },
+                }),
             ) => {
+                let value_type_key = value_type.clone();
+                let extractor = extractor.clone();
+                let right_value_key = right_value_key.clone();
+
                 if !self.same_product_shape(
                     &extractor,
-                    &right_extractor,
+                    right_extractor,
                     left_parameters.len(),
                     right_parameters.len(),
                 ) {
-                    self.build_atomic_intersection(value_type, right_value_key, left_space)
+                    self.build_atomic_intersection(value_type_key, right_value_key, left_space)
                 } else {
+                    let left_parameters = Self::copy_space_handles(left_parameters);
+                    let right_parameters = Self::copy_space_handles(right_parameters);
                     self.intersect_product_parameters(
-                        value_type,
+                        value_type_key,
                         extractor,
-                        left_parameters.to_vec(),
-                        right_parameters.to_vec(),
+                        left_parameters,
+                        right_parameters,
                     )
                 }
             }

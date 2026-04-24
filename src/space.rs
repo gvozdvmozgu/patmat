@@ -74,11 +74,6 @@ impl<T, E> Space<T, E> {
         self.id.checked_sub(1).map(|index| index as usize)
     }
 
-    #[inline]
-    pub(crate) fn raw_id(self) -> u32 {
-        self.id
-    }
-
     /// Returns `true` when the space contains no values.
     #[inline]
     pub const fn is_empty(self) -> bool {
@@ -108,9 +103,9 @@ impl<T, E> Clone for Space<T, E> {
     }
 }
 
-#[inline]
+#[inline(always)]
 pub(crate) fn space_pair_key<T, E>(left: Space<T, E>, right: Space<T, E>) -> SpacePairKey {
-    ((left.raw_id() as SpacePairKey) << u32::BITS) | right.raw_id() as SpacePairKey
+    ((left.id as SpacePairKey) << u32::BITS) | right.id as SpacePairKey
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]

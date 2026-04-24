@@ -20,7 +20,7 @@ impl<V> Default for PairCache<V> {
 }
 
 impl<V> PairCache<V> {
-    #[inline]
+    #[inline(always)]
     fn get(&self, key: SpacePairKey) -> Option<V>
     where
         V: Copy,
@@ -28,11 +28,12 @@ impl<V> PairCache<V> {
         self.values.get(&key).copied()
     }
 
-    #[inline]
+    #[inline(always)]
     fn insert(&mut self, key: SpacePairKey, value: V) {
         self.values.insert(key, value);
     }
 
+    #[inline]
     fn clear(&mut self) {
         self.values.clear();
     }
@@ -71,7 +72,7 @@ where
     O: SpaceOperations,
     TI: SpaceInterner<Item = O::Type>,
 {
-    #[inline]
+    #[inline(always)]
     pub(super) fn subspace_result(
         &self,
         left: EngineSpace<O>,
@@ -80,7 +81,7 @@ where
         self.subspace_results.get(space_pair_key(left, right))
     }
 
-    #[inline]
+    #[inline(always)]
     pub(super) fn insert_subspace_result(
         &mut self,
         left: EngineSpace<O>,
@@ -91,7 +92,7 @@ where
             .insert(space_pair_key(left, right), result);
     }
 
-    #[inline]
+    #[inline(always)]
     pub(super) fn intersection_result(
         &self,
         left: EngineSpace<O>,
@@ -100,7 +101,7 @@ where
         self.intersection_results.get(space_pair_key(left, right))
     }
 
-    #[inline]
+    #[inline(always)]
     pub(super) fn insert_intersection_result(
         &mut self,
         left: EngineSpace<O>,
@@ -111,7 +112,7 @@ where
             .insert(space_pair_key(left, right), result);
     }
 
-    #[inline]
+    #[inline(always)]
     pub(super) fn subtraction_result(
         &self,
         left: EngineSpace<O>,
@@ -120,7 +121,7 @@ where
         self.subtraction_results.get(space_pair_key(left, right))
     }
 
-    #[inline]
+    #[inline(always)]
     pub(super) fn insert_subtraction_result(
         &mut self,
         left: EngineSpace<O>,

@@ -49,15 +49,6 @@ impl<S: Copy> SpaceHandles<S> {
         }
     }
 
-    fn len(&self) -> usize {
-        match self {
-            Self::Empty => 0,
-            Self::One(_) => 1,
-            Self::Two(_) => 2,
-            Self::Many(spaces) => spaces.len(),
-        }
-    }
-
     fn to_vec(&self) -> Vec<S> {
         match self {
             Self::Empty => Vec::new(),
