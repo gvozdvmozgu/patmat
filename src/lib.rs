@@ -7,6 +7,7 @@ type Hasher = foldhash::fast::RandomState;
 type IndexSet<T> = indexmap::IndexSet<T, Hasher>;
 type HashMap<K, V> = hashbrown::HashMap<K, V, Hasher>;
 type HashSet<T> = hashbrown::HashSet<T, Hasher>;
+type SpacePairKey = u64;
 
 const EMPTY_SPACE_ID: u32 = 0;
 
@@ -195,6 +196,11 @@ impl<T, E> Space<T, E> {
     {
         context.kind(self)
     }
+}
+
+#[inline]
+fn space_pair_key<T, E>(left: Space<T, E>, right: Space<T, E>) -> SpacePairKey {
+    ((left.id as SpacePairKey) << u32::BITS) | right.id as SpacePairKey
 }
 
 impl<T, E> Copy for Space<T, E> {}
@@ -417,7 +423,9 @@ where
     where
         I: IntoIterator<Item = Space<T, E>>,
     {
-        let mut members = Vec::new();
+        let spaces = spaces.into_iter();
+        let (lower_bound, _) = spaces.size_hint();
+        let mut members = Vec::with_capacity(lower_bound);
         for space in spaces {
             self.extend_union_members(&mut members, space);
         }
@@ -432,6 +440,7 @@ where
     TI: SpaceInterner<Item = T>,
     EI: SpaceInterner<Item = E>,
 {
+    #[inline]
     fn lookup_node(
         &self,
         space: Space<T, E>,
@@ -446,6 +455,7 @@ where
             .map(Some)
     }
 
+    #[inline]
     fn node(&self, space: Space<T, E>) -> Option<&InternedSpaceNode<T, E, TI, EI>> {
         self.lookup_node(space)
             .expect("space id must reference a node in this context")
@@ -511,6 +521,24 @@ where
             0 => self.empty(),
             1 => members.pop().expect("space length checked"),
             _ => self.intern_node(SpaceNode::Union(members.into_boxed_slice())),
+        }
+    }
+
+    fn union_pair(&mut self, left: Space<T, E>, right: Space<T, E>) -> Space<T, E> {
+        match (self.node(left), self.node(right)) {
+            (None, None) => self.empty(),
+            (None, Some(_)) => right,
+            (Some(_), None) => left,
+            (Some(SpaceNode::Union(_)), _) | (_, Some(SpaceNode::Union(_))) => {
+                let mut members = Vec::with_capacity(2);
+                self.extend_union_members(&mut members, left);
+                self.extend_union_members(&mut members, right);
+                self.union_from_members(members)
+            }
+            (Some(_), Some(_)) => {
+                let members: Box<[Space<T, E>]> = Box::new([left, right]);
+                self.intern_node(SpaceNode::Union(members))
+            }
         }
     }
 }
@@ -831,7 +859,10 @@ type DecompositionCache<TI> = HashMap<TypeKey<TI>, Decomposition<TypeKey<TI>>>;
 
 struct Caches<O: SpaceOperations, TI: SpaceInterner<Item = O::Type>> {
     simplified_spaces: HashMap<EngineSpace<O>, EngineSpace<O>>,
-    subspace_results: HashMap<(EngineSpace<O>, EngineSpace<O>), bool>,
+    subspace_results: HashMap<SpacePairKey, bool>,
+    intersection_results: HashMap<SpacePairKey, EngineSpace<O>>,
+    subtraction_results: HashMap<SpacePairKey, EngineSpace<O>>,
+    flattened_spaces: HashMap<EngineSpace<O>, Box<[EngineSpace<O>]>>,
     decompositions: DecompositionCache<TI>,
     decomposed_unions: HashMap<TypeKey<TI>, EngineSpace<O>>,
 }
@@ -845,6 +876,9 @@ where
         Self {
             simplified_spaces: HashMap::default(),
             subspace_results: HashMap::default(),
+            intersection_results: HashMap::default(),
+            subtraction_results: HashMap::default(),
+            flattened_spaces: HashMap::default(),
             decompositions: HashMap::default(),
             decomposed_unions: HashMap::default(),
         }
@@ -859,6 +893,9 @@ where
     fn clear(&mut self) {
         self.simplified_spaces.clear();
         self.subspace_results.clear();
+        self.intersection_results.clear();
+        self.subtraction_results.clear();
+        self.flattened_spaces.clear();
         self.decompositions.clear();
         self.decomposed_unions.clear();
     }
@@ -1033,6 +1070,11 @@ where
         self.context.union(spaces)
     }
 
+    #[inline]
+    fn build_union2(&mut self, left: EngineSpace<O>, right: EngineSpace<O>) -> EngineSpace<O> {
+        self.context.union_pair(left, right)
+    }
+
     fn map_union_members(
         &mut self,
         members: Vec<EngineSpace<O>>,
@@ -1137,20 +1179,17 @@ where
                     space
                 }
             }
-            Some(SpaceNode::Product { value_type, .. }) => {
+            Some(SpaceNode::Product {
+                value_type,
+                extractor,
+                parameters,
+            }) => {
                 let value_type_key = value_type.clone();
+                let extractor = extractor.clone();
+                let parameters = parameters.to_vec();
                 if self.type_key_is_uninhabited(value_type_key.clone()) {
                     self.empty_space()
                 } else {
-                    let (extractor, parameters) = match self.context.node(space) {
-                        Some(SpaceNode::Product {
-                            extractor,
-                            parameters,
-                            ..
-                        }) => (extractor.clone(), parameters.to_vec()),
-                        _ => unreachable!("space node shape changed unexpectedly"),
-                    };
-
                     let mut simplified_parameters = Vec::with_capacity(parameters.len());
                     let mut changed = false;
 
@@ -1224,11 +1263,15 @@ where
             return true;
         }
 
+        if left_space == right_space {
+            return true;
+        }
+
         if right_space.is_empty() {
             return false;
         }
 
-        let cache_key = (left_space, right_space);
+        let cache_key = space_pair_key(left_space, right_space);
         if let Some(&cached_result) = self.caches.subspace_results.get(&cache_key) {
             return cached_result;
         }
@@ -1239,7 +1282,37 @@ where
     }
 
     /// Intersects two spaces.
+    #[inline(always)]
     pub fn intersect(
+        &mut self,
+        left_space: EngineSpace<O>,
+        right_space: EngineSpace<O>,
+    ) -> EngineSpace<O> {
+        if left_space.is_empty() || right_space.is_empty() {
+            let _ = self.context.node(left_space);
+            let _ = self.context.node(right_space);
+            return self.empty_space();
+        }
+
+        if left_space == right_space {
+            let _ = self.context.node(left_space);
+            return left_space;
+        }
+
+        let cache_key = space_pair_key(left_space, right_space);
+        if let Some(&cached_intersection) = self.caches.intersection_results.get(&cache_key) {
+            return cached_intersection;
+        }
+
+        let intersection = self.compute_intersection(left_space, right_space);
+        self.caches
+            .intersection_results
+            .insert(cache_key, intersection);
+        intersection
+    }
+
+    #[inline(always)]
+    fn compute_intersection(
         &mut self,
         left_space: EngineSpace<O>,
         right_space: EngineSpace<O>,
@@ -1374,7 +1447,39 @@ where
     }
 
     /// Subtracts `right_space` from `left_space`.
+    #[inline(always)]
     pub fn subtract(
+        &mut self,
+        left_space: EngineSpace<O>,
+        right_space: EngineSpace<O>,
+    ) -> EngineSpace<O> {
+        if left_space.is_empty() {
+            let _ = self.context.node(right_space);
+            return self.empty_space();
+        }
+
+        if right_space.is_empty() {
+            let _ = self.context.node(left_space);
+            return left_space;
+        }
+
+        if left_space == right_space {
+            let _ = self.context.node(left_space);
+            return self.empty_space();
+        }
+
+        let cache_key = space_pair_key(left_space, right_space);
+        if let Some(&cached_remainder) = self.caches.subtraction_results.get(&cache_key) {
+            return cached_remainder;
+        }
+
+        let remainder = self.compute_subtraction(left_space, right_space);
+        self.caches.subtraction_results.insert(cache_key, remainder);
+        remainder
+    }
+
+    #[inline(always)]
+    fn compute_subtraction(
         &mut self,
         left_space: EngineSpace<O>,
         right_space: EngineSpace<O>,
@@ -1716,9 +1821,21 @@ where
         }
     }
 
+    #[inline]
     fn flatten_space(&mut self, space: EngineSpace<O>) -> Vec<EngineSpace<O>> {
+        if space.is_empty() {
+            return vec![space];
+        }
+
+        if let Some(cached_spaces) = self.caches.flattened_spaces.get(&space) {
+            return cached_spaces.to_vec();
+        }
+
         let mut flattened = Vec::new();
         self.flatten_space_into(space, &mut flattened);
+        self.caches
+            .flattened_spaces
+            .insert(space, flattened.clone().into_boxed_slice());
         flattened
     }
 
@@ -1922,6 +2039,10 @@ where
             remainder = self.subtract(remainder, arm.pattern_space);
         }
 
+        if remainder.is_empty() {
+            return Vec::new();
+        }
+
         let simplified_remainder = self.simplify(remainder);
         let uncovered_spaces = self.flatten_space(simplified_remainder);
         let mut filtered_spaces = Vec::with_capacity(uncovered_spaces.len());
@@ -1961,7 +2082,7 @@ where
         for (arm_index, arm) in match_input.arms.iter().enumerate() {
             let current_space = if arm.is_wildcard {
                 if let Some(null_space) = match_input.null_space {
-                    self.build_union([arm.pattern_space, null_space])
+                    self.build_union2(arm.pattern_space, null_space)
                 } else {
                     arm.pattern_space
                 }
@@ -1996,7 +2117,7 @@ where
                 emitted_only_null_warning,
                 match_input.null_space,
             ) {
-                let wildcard_cover = self.build_union([previous_union, null_space]);
+                let wildcard_cover = self.build_union2(previous_union, null_space);
                 if self.is_subspace(covered_space, wildcard_cover) {
                     emitted_only_null_warning = true;
                     let non_null_space =
@@ -2011,7 +2132,7 @@ where
             }
 
             if !arm.is_partial && !covered_space.is_empty() {
-                previous_union = self.build_union([previous_union, covered_space]);
+                previous_union = self.build_union2(previous_union, covered_space);
                 covered_by_previous_arms.push(CoveredArm {
                     arm_index,
                     covered_space,
