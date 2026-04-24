@@ -3,7 +3,6 @@ use super::{
     PreInternedSpaceContext, Space, SpaceContext, SpaceEngine, SpaceInterner, SpaceKind,
     SpaceLookupError, SpaceOperations, check_match,
 };
-use std::marker::PhantomData;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum TestType {
@@ -39,22 +38,13 @@ impl SpaceOperations for TestOperations {
         left == right
     }
 
-    fn extractor_parameter_types(
+    fn covering_extractor_parameter_types(
         &self,
         _extractor: &Self::Extractor,
         _scrutinee_type: &Self::Type,
         _arity: usize,
-    ) -> Vec<Self::Type> {
-        Vec::new()
-    }
-
-    fn extractor_covers_type(
-        &self,
-        _extractor: &Self::Extractor,
-        _scrutinee_type: &Self::Type,
-        _arity: usize,
-    ) -> bool {
-        false
+    ) -> Option<Vec<Self::Type>> {
+        None
     }
 
     fn intersect_atomic_types(
@@ -98,28 +88,16 @@ impl SpaceOperations for IdOperations {
         left == right
     }
 
-    fn extractor_parameter_types(
+    fn covering_extractor_parameter_types(
         &self,
         extractor: &Self::Extractor,
         scrutinee_type: &Self::Type,
         arity: usize,
-    ) -> Vec<Self::Type> {
+    ) -> Option<Vec<Self::Type>> {
         match (*extractor, *scrutinee_type, arity) {
-            (IdExtractor(7), IdType(3), 1) => vec![IdType(0)],
-            _ => Vec::new(),
+            (IdExtractor(7), IdType(3), 1) => Some(vec![IdType(0)]),
+            _ => None,
         }
-    }
-
-    fn extractor_covers_type(
-        &self,
-        extractor: &Self::Extractor,
-        scrutinee_type: &Self::Type,
-        arity: usize,
-    ) -> bool {
-        matches!(
-            (*extractor, *scrutinee_type, arity),
-            (IdExtractor(7), IdType(3), 1)
-        )
     }
 
     fn intersect_atomic_types(
@@ -163,10 +141,7 @@ fn engine_uses_context_backed_space_ids() {
 #[test]
 fn try_kind_reports_unknown_non_empty_space_ids() {
     let context: SpaceContext<TestType, TestExtractor> = SpaceContext::new();
-    let unknown_space = Space {
-        id: 1,
-        _marker: PhantomData,
-    };
+    let unknown_space = Space::from_raw_id_for_tests(1);
 
     assert_eq!(context.try_kind(context.empty()), Ok(SpaceKind::Empty));
     assert_eq!(context.try_kind(unknown_space), Err(SpaceLookupError));
@@ -176,10 +151,7 @@ fn try_kind_reports_unknown_non_empty_space_ids() {
 #[should_panic(expected = "space id must reference a node in this context")]
 fn kind_panics_on_unknown_non_empty_space() {
     let context: SpaceContext<TestType, TestExtractor> = SpaceContext::new();
-    let unknown_space = Space {
-        id: 1,
-        _marker: PhantomData,
-    };
+    let unknown_space = Space::from_raw_id_for_tests(1);
 
     let _ = context.kind(unknown_space);
 }

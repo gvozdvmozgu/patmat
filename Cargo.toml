@@ -1,6 +1,6 @@
 [package]
 name = "patmat"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Generic space algebra for pattern-match exhaustivity and reachability analysis"
 readme = "README.md"

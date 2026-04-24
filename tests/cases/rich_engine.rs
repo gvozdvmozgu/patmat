@@ -299,6 +299,32 @@ fn subtract_covers_type_product_and_product_type_paths() {
 }
 
 #[test]
+fn product_lifting_uses_covering_extractor_parameter_types() {
+    let mut context = rich_context();
+
+    let left_set = context.of_type(RichType::LeftSet);
+    let covering_zero_arity_product =
+        context.product(RichType::LeftSet, RichExtractor::Other, vec![]);
+    let true_space = context.of_type(RichType::True);
+    let non_covering_zero_arity_product =
+        context.product(RichType::True, RichExtractor::Other, vec![]);
+
+    let mut engine = rich_engine(&mut context);
+
+    assert!(engine.is_subspace(left_set, covering_zero_arity_product));
+    assert!(
+        engine
+            .subtract(left_set, covering_zero_arity_product)
+            .is_empty()
+    );
+    assert!(!engine.is_subspace(true_space, non_covering_zero_arity_product));
+    assert_eq!(
+        engine.subtract(true_space, non_covering_zero_arity_product),
+        true_space
+    );
+}
+
+#[test]
 fn subtract_product_product_covers_shape_and_remainder_cases() {
     let mut context = rich_context();
 
