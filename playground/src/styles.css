@@ -280,7 +280,7 @@ button.editor-hint {
   align-items: flex-start;
   border: 1px solid;
   border-radius: 8px;
-  padding: 10px 11px;
+  padding: 9px 10px;
 }
 
 .summary svg {
@@ -291,8 +291,14 @@ button.editor-hint {
 }
 
 .summary div {
-  display: grid;
-  gap: 3px;
+  min-width: 0;
+}
+
+.summary p {
+  margin: 0;
+  color: #4f5c57;
+  line-height: 1.38;
+  font-size: 0.9rem;
 }
 
 .summary strong {
@@ -300,15 +306,13 @@ button.editor-hint {
 }
 
 .summary span {
-  color: #4f5c57;
-  line-height: 1.38;
-  font-size: 0.9rem;
+  color: inherit;
 }
 
 .summary.success {
-  color: #2f694c;
-  border-color: #d9e5dd;
-  background: #f7fbf8;
+  color: #476057;
+  border-color: #e1e6e1;
+  background: #fbfcfa;
 }
 
 .summary.notice {
@@ -399,20 +403,20 @@ button.editor-hint {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 22px;
+  min-height: 20px;
   width: fit-content;
   border-radius: 999px;
-  padding: 2px 7px;
-  font-size: 0.68rem;
+  padding: 2px 6px;
+  font-size: 0.66rem;
   font-weight: 700;
   line-height: 1;
   border: 1px solid;
 }
 
 .badge.reachable {
-  color: #35684e;
-  background: #f8fbf9;
-  border-color: #d8e5dd;
+  color: #6b7670;
+  background: #fbfbf9;
+  border-color: #e2e7e2;
 }
 
 .badge.unreachable,
@@ -454,6 +458,10 @@ button.editor-hint {
 
 .arm-row:hover:not(.header) {
   background: #fafcf9;
+}
+
+.arm-row.active:not(.header) {
+  background: #eef6f1;
 }
 
 .arm-row.header {
@@ -567,6 +575,24 @@ code {
   cursor: pointer;
 }
 
+.guidance summary > div {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.guidance-chevron {
+  width: 15px;
+  height: 15px;
+  color: #64706b;
+  transform: rotate(-90deg);
+  transition: transform 0.14s ease;
+}
+
+.guidance[open] .guidance-chevron {
+  transform: rotate(0deg);
+}
+
 .guidance summary span {
   color: #818b86;
   font-size: 0.86rem;
@@ -574,6 +600,14 @@ code {
 
 .guidance[open] summary {
   border-bottom: 1px solid #e7ebe7;
+}
+
+.guidance summary::marker {
+  content: "";
+}
+
+.guidance summary::-webkit-details-marker {
+  display: none;
 }
 
 .tabs {

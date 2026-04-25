@@ -88,7 +88,7 @@ match Bool:
   },
   {
     name: "Option Bool",
-    description: "Covers every nested Bool inside Option.",
+    description: "Covers nested Bool values with separate arms.",
     source: `type Bool =
   | true
   | false
@@ -100,6 +100,22 @@ type Option<T> =
 match Option<Bool>:
   Some(true)
   Some(false)
+  None
+`,
+  },
+  {
+    name: "Or-pattern Option",
+    description: "Uses `true | false` inside a constructor pattern.",
+    source: `type Bool =
+  | true
+  | false
+
+type Option<T> =
+  | Some(T)
+  | None
+
+match Option<Bool>:
+  Some(true | false)
   None
 `,
   },
@@ -146,6 +162,7 @@ function App() {
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [selectedLine, setSelectedLine] = useState<number | null>(null);
   const [previewLine, setPreviewLine] = useState<number | null>(null);
+  const [previewArmIndex, setPreviewArmIndex] = useState<number | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [scrollLeft, setScrollLeft] = useState(0);
   const [guidanceTab, setGuidanceTab] = useState<GuidanceTab>("syntax");
@@ -199,6 +216,11 @@ function App() {
     }
     return new Map(result.arms.map((arm) => [arm.index, positionForOffset(source, arm.span.start).line]));
   }, [result, source]);
+  const armLineLookup = useMemo(() => {
+    const lookup = new Map<number, number>();
+    armLines.forEach((line, armIndex) => lookup.set(line, armIndex));
+    return lookup;
+  }, [armLines]);
 
   const errorLineColumn = useMemo(() => {
     if (!result || result.ok || !result.span) {
@@ -215,6 +237,8 @@ function App() {
 
     const position = positionForOffset(source, span.start);
     setSelectedLine(position.line);
+    setPreviewLine(null);
+    setPreviewArmIndex(null);
     textarea.focus();
     textarea.setSelectionRange(span.start, span.end);
   }
@@ -228,8 +252,32 @@ function App() {
     const { start, end } = spanForLine(source, line);
     setSelectedLine(line);
     setPreviewLine(null);
+    setPreviewArmIndex(null);
     textarea.focus();
     textarea.setSelectionRange(start, end);
+  }
+
+  function previewEditorLineFromPointer(clientY: number) {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      return;
+    }
+
+    const line = lineForEditorPointer(textarea, clientY);
+    const armIndex = armLineLookup.get(line);
+    if (armIndex === undefined) {
+      setPreviewLine(null);
+      setPreviewArmIndex(null);
+      return;
+    }
+
+    setPreviewLine(line);
+    setPreviewArmIndex(armIndex);
+  }
+
+  function clearPreview() {
+    setPreviewLine(null);
+    setPreviewArmIndex(null);
   }
 
   function insertMissingPattern(pattern: string) {
@@ -264,7 +312,7 @@ function App() {
                     if (example) {
                       setSource(example.source);
                       setSelectedLine(null);
-                      setPreviewLine(null);
+                      clearPreview();
                     }
                   }}
                 >
@@ -319,7 +367,12 @@ function App() {
               spellCheck={false}
               wrap="off"
               value={source}
-              onChange={(event) => setSource(event.target.value)}
+              onChange={(event) => {
+                setSource(event.target.value);
+                clearPreview();
+              }}
+              onMouseMove={(event) => previewEditorLineFromPointer(event.clientY)}
+              onMouseLeave={clearPreview}
               onScroll={(event) => {
                 setScrollTop(event.currentTarget.scrollTop);
                 setScrollLeft(event.currentTarget.scrollLeft);
@@ -353,6 +406,8 @@ function App() {
               onFocusArm={(arm) => focusSpan(arm.span)}
               onFocusLine={focusLine}
               onPreviewLine={setPreviewLine}
+              previewArmIndex={previewArmIndex}
+              onPreviewArm={setPreviewArmIndex}
             />
           )}
           {ready && source.trim().length > 0 && result && !result.ok && (
@@ -396,6 +451,8 @@ function AnalysisPanel({
   onFocusArm,
   onFocusLine,
   onPreviewLine,
+  previewArmIndex,
+  onPreviewArm,
 }: {
   result: SuccessResult;
   armLines: Map<number, number>;
@@ -403,11 +460,13 @@ function AnalysisPanel({
   onFocusArm: (arm: Arm) => void;
   onFocusLine: (line: number) => void;
   onPreviewLine: (line: number | null) => void;
+  previewArmIndex: number | null;
+  onPreviewArm: (armIndex: number | null) => void;
 }) {
   const unreachableCount = result.warnings.filter((warning) => warning.kind === "Unreachable").length;
   const missingCount = result.uncovered.length;
   const summary = result.isExhaustive
-    ? `All possible ${result.scrutinee} values are covered.`
+    ? `${result.scrutinee} is fully covered.`
     : `The match does not cover: ${result.uncovered.join(", ")}.`;
   const label = result.isExhaustive ? "Exhaustive" : "Missing cases";
   const tone = !result.isExhaustive ? "warning" : unreachableCount > 0 ? "notice" : "success";
@@ -423,11 +482,9 @@ function AnalysisPanel({
         </p>
       )}
 
-      <section className="diagnostic-section">
-        <h3>Missing patterns</h3>
-        {result.uncovered.length === 0 ? (
-          <p className="quiet">None.</p>
-        ) : (
+      {result.uncovered.length > 0 && (
+        <section className="diagnostic-section">
+          <h3>Missing patterns</h3>
           <div className="diagnostic-list">
             {result.uncovered.map((space) => (
               <div
@@ -442,8 +499,8 @@ function AnalysisPanel({
               </div>
             ))}
           </div>
-        )}
-      </section>
+        </section>
+      )}
 
       {result.warnings.length > 0 && (
         <section className="diagnostic-section">
@@ -476,16 +533,31 @@ function AnalysisPanel({
           ) : (
             result.arms.map((arm) => (
               <div
-                className="arm-row"
+                className={previewArmIndex === arm.index ? "arm-row active" : "arm-row"}
                 role="row"
                 key={`${arm.index}-${arm.source}`}
                 onMouseEnter={() => {
                   const line = armLines.get(arm.index);
                   if (line) {
                     onPreviewLine(line);
+                    onPreviewArm(arm.index);
                   }
                 }}
-                onMouseLeave={() => onPreviewLine(null)}
+                onMouseLeave={() => {
+                  onPreviewLine(null);
+                  onPreviewArm(null);
+                }}
+                onFocus={() => {
+                  const line = armLines.get(arm.index);
+                  if (line) {
+                    onPreviewLine(line);
+                    onPreviewArm(arm.index);
+                  }
+                }}
+                onBlur={() => {
+                  onPreviewLine(null);
+                  onPreviewArm(null);
+                }}
               >
                 <button
                   type="button"
@@ -642,8 +714,9 @@ function DiagnosticSummary({
     <div className={`summary ${tone}`}>
       <Icon aria-hidden="true" />
       <div>
-        <strong>{label}</strong>
-        <span>{detail}</span>
+        <p>
+          <strong>{label}</strong> — <span>{detail}</span>
+        </p>
       </div>
     </div>
   );
@@ -669,7 +742,10 @@ function Guidance({
   return (
     <details className="guidance">
       <summary>
-        <h2>Guidance</h2>
+        <div>
+          <ChevronDown className="guidance-chevron" aria-hidden="true" />
+          <h2>Guidance</h2>
+        </div>
         <span>Syntax help and examples</span>
       </summary>
       <div className="guidance-panel">
@@ -710,6 +786,8 @@ type Result<T, E> =
 Constructor
 Constructor(_)
 Constructor(left, right)
+left | right
+Constructor(left | right)
 
 Names like true, false, and None are nullary constructors.`}</pre>
         )}
@@ -791,6 +869,14 @@ function spanForLine(source: string, line: number) {
     end = source.length;
   }
   return { start, end };
+}
+
+function lineForEditorPointer(textarea: HTMLTextAreaElement, clientY: number) {
+  const editorPaddingTop = 16;
+  const editorLineHeight = 24;
+  const { top } = textarea.getBoundingClientRect();
+  const y = clientY - top + textarea.scrollTop - editorPaddingTop;
+  return Math.max(1, Math.floor(y / editorLineHeight) + 1);
 }
 
 function plural(count: number, singular: string, pluralText: string) {

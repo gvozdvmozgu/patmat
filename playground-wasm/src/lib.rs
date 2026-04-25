@@ -77,6 +77,10 @@ enum Pattern {
     Wildcard {
         span: Span,
     },
+    Or {
+        alternatives: Vec<Pattern>,
+        span: Span,
+    },
     Constructor {
         name: String,
         args: Vec<Pattern>,
@@ -87,7 +91,9 @@ enum Pattern {
 impl Pattern {
     fn span(&self) -> Span {
         match self {
-            Self::Wildcard { span } | Self::Constructor { span, .. } => *span,
+            Self::Wildcard { span } | Self::Or { span, .. } | Self::Constructor { span, .. } => {
+                *span
+            }
         }
     }
 }
@@ -370,6 +376,32 @@ impl Parser {
     }
 
     fn parse_pattern(&mut self) -> Result<Pattern, DslError> {
+        let mut alternatives = vec![self.parse_primary_pattern()?];
+        while self.consume_kind(&TokenKind::Pipe).is_some() {
+            alternatives.push(self.parse_primary_pattern()?);
+        }
+
+        if alternatives.len() == 1 {
+            Ok(alternatives.pop().expect("one alternative was parsed"))
+        } else {
+            let start = alternatives
+                .first()
+                .expect("or pattern alternatives must not be empty")
+                .span()
+                .start;
+            let end = alternatives
+                .last()
+                .expect("or pattern alternatives must not be empty")
+                .span()
+                .end;
+            Ok(Pattern::Or {
+                alternatives,
+                span: Span { start, end },
+            })
+        }
+    }
+
+    fn parse_primary_pattern(&mut self) -> Result<Pattern, DslError> {
         if let Some(span) = self.consume_kind(&TokenKind::Underscore) {
             return Ok(Pattern::Wildcard { span });
         }
@@ -699,6 +731,13 @@ impl Model {
     ) -> Result<Space<RuntimeType, RuntimeExtractor>, DslError> {
         match pattern {
             Pattern::Wildcard { .. } => Ok(context.of_type(expected.clone())),
+            Pattern::Or { alternatives, .. } => {
+                let spaces = alternatives
+                    .iter()
+                    .map(|alternative| self.lower_pattern(context, alternative, expected))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(context.union(spaces))
+            }
             Pattern::Constructor { name, args, span } => {
                 let resolved = self.constructor_in_type(expected, name, *span)?;
                 let variant =
@@ -1177,6 +1216,20 @@ mod tests {
     #[test]
     fn analyzes_exhaustive_option_bool() {
         let source = "type Bool =\n  | true\n  | false\n\ntype Option<T> =\n  | Some(T)\n  | None\n\nmatch Option<Bool>:\n  Some(true)\n  Some(false)\n  None\n";
+        assert_eq!(json(source)["isExhaustive"], true);
+    }
+
+    #[test]
+    fn analyzes_nested_or_pattern() {
+        let source = "type Bool =\n  | true\n  | false\n\ntype Option<T> =\n  | Some(T)\n  | None\n\nmatch Option<Bool>:\n  Some(true | false)\n  None\n";
+        let result = json(source);
+        assert_eq!(result["isExhaustive"], true);
+        assert_eq!(result["arms"][0]["space"], "Some(true | false)");
+    }
+
+    #[test]
+    fn analyzes_top_level_or_pattern() {
+        let source = "type Bool =\n  | true\n  | false\n\nmatch Bool:\n  true | false\n";
         assert_eq!(json(source)["isExhaustive"], true);
     }
 
