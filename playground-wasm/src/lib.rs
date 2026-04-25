@@ -50,6 +50,7 @@ struct Program {
 struct TypeDecl {
     name: String,
     params: Vec<String>,
+    parent: Option<TypeExpr>,
     constructors: Vec<ConstructorDecl>,
     span: Span,
 }
@@ -105,6 +106,7 @@ enum TokenKind {
     KeywordMatch,
     Pipe,
     Equal,
+    Subtype,
     Colon,
     Comma,
     LParen,
@@ -158,6 +160,10 @@ fn lex(source: &str) -> Result<Vec<Token>, DslError> {
             b')' => {
                 index += 1;
                 TokenKind::RParen
+            }
+            b'<' if bytes.get(index + 1) == Some(&b':') => {
+                index += 2;
+                TokenKind::Subtype
             }
             b'<' => {
                 index += 1;
@@ -278,6 +284,12 @@ impl Parser {
             Vec::new()
         };
 
+        let parent = if self.consume_kind(&TokenKind::Subtype).is_some() {
+            Some(self.parse_type_expr()?)
+        } else {
+            None
+        };
+
         self.expect_kind(&TokenKind::Equal, "Expected `=`")?;
         let mut constructors = Vec::new();
         while self.consume_kind(&TokenKind::Pipe).is_some() {
@@ -297,6 +309,7 @@ impl Parser {
         Ok(TypeDecl {
             name,
             params,
+            parent,
             constructors,
             span: Span { start, end },
         })
@@ -508,6 +521,12 @@ struct RuntimeExtractor {
     constructor: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VisitState {
+    Visiting,
+    Done,
+}
+
 impl Model {
     fn build(program: &Program) -> Result<Self, DslError> {
         let mut type_by_name = HashMap::new();
@@ -548,10 +567,18 @@ impl Model {
 
         for type_decl in &model.types {
             let params: HashSet<_> = type_decl.params.iter().cloned().collect();
+            if let Some(parent) = &type_decl.parent {
+                model.validate_parent_type_expr(parent, &params)?;
+            }
             for constructor in &type_decl.constructors {
                 for field in &constructor.fields {
                     model.validate_type_expr(field, &params)?;
-                    if field.references_type(&type_decl.name) {
+                    if model.type_expr_reaches_type(
+                        field,
+                        &type_decl.name,
+                        &params,
+                        &mut HashSet::new(),
+                    ) {
                         return Err(DslError::at(
                             format!("Recursive type `{}` is not supported", type_decl.name),
                             field.span(),
@@ -560,6 +587,9 @@ impl Model {
                 }
             }
         }
+
+        model.detect_inheritance_cycles()?;
+        model.validate_refinements()?;
 
         Ok(model)
     }
@@ -601,6 +631,224 @@ impl Model {
         }
 
         Ok(())
+    }
+
+    fn validate_parent_type_expr(
+        &self,
+        expr: &TypeExpr,
+        params: &HashSet<String>,
+    ) -> Result<(), DslError> {
+        let TypeExpr::Named(name, args, span) = expr;
+        if params.contains(name) {
+            return Err(DslError::at(format!("Unknown parent type `{name}`"), *span));
+        }
+
+        let Some(type_decl) = self.type_decl(name) else {
+            return Err(DslError::at(format!("Unknown parent type `{name}`"), *span));
+        };
+
+        if type_decl.params.len() != args.len() {
+            return Err(DslError::at(
+                format!(
+                    "Parent type `{}` expects {} type argument(s), got {}",
+                    name,
+                    type_decl.params.len(),
+                    args.len()
+                ),
+                *span,
+            ));
+        }
+
+        for arg in args {
+            self.validate_type_expr(arg, params)?;
+        }
+
+        Ok(())
+    }
+
+    fn detect_inheritance_cycles(&self) -> Result<(), DslError> {
+        let mut states = HashMap::new();
+        for type_decl in &self.types {
+            self.visit_parent_chain(&type_decl.name, &mut states)?;
+        }
+        Ok(())
+    }
+
+    fn visit_parent_chain(
+        &self,
+        name: &str,
+        states: &mut HashMap<String, VisitState>,
+    ) -> Result<(), DslError> {
+        match states.get(name) {
+            Some(VisitState::Done) => return Ok(()),
+            Some(VisitState::Visiting) => {
+                let span = self.type_decl(name).map(|type_decl| {
+                    type_decl
+                        .parent
+                        .as_ref()
+                        .map_or(type_decl.span, TypeExpr::span)
+                });
+                return Err(DslError::new(
+                    format!("Inheritance cycle involving `{name}`"),
+                    span,
+                ));
+            }
+            None => {}
+        }
+
+        states.insert(name.to_owned(), VisitState::Visiting);
+        let parent_name = self
+            .type_decl(name)
+            .and_then(|type_decl| type_decl.parent.as_ref())
+            .map(TypeExpr::root_name);
+        if let Some(parent_name) = parent_name {
+            self.visit_parent_chain(parent_name, states)?;
+        }
+        states.insert(name.to_owned(), VisitState::Done);
+        Ok(())
+    }
+
+    fn validate_refinements(&self) -> Result<(), DslError> {
+        for type_decl in &self.types {
+            let Some(parent) = &type_decl.parent else {
+                continue;
+            };
+            let TypeExpr::Named(parent_name, parent_args, _) = parent;
+            let parent_decl = self
+                .type_decl(parent_name)
+                .expect("validated parent type must exist");
+            let parent_substitutions: HashMap<_, _> = parent_decl
+                .params
+                .iter()
+                .cloned()
+                .zip(parent_args.iter().cloned())
+                .collect();
+            let child_params: HashSet<_> = type_decl.params.iter().cloned().collect();
+
+            for constructor in &type_decl.constructors {
+                let Some(parent_constructor) = parent_decl
+                    .constructors
+                    .iter()
+                    .find(|candidate| candidate.name == constructor.name)
+                else {
+                    return Err(DslError::at(
+                        format!(
+                            "Constructor `{}` is not declared by parent type `{}`",
+                            constructor.name, parent_name
+                        ),
+                        constructor.span,
+                    ));
+                };
+
+                if parent_constructor.fields.len() != constructor.fields.len() {
+                    return Err(DslError::at(
+                        format!(
+                            "Constructor `{}` has {} field(s), but parent type `{}` declares {}",
+                            constructor.name,
+                            constructor.fields.len(),
+                            parent_name,
+                            parent_constructor.fields.len()
+                        ),
+                        constructor.span,
+                    ));
+                }
+
+                for (field_index, (child_field, parent_field)) in constructor
+                    .fields
+                    .iter()
+                    .zip(parent_constructor.fields.iter())
+                    .enumerate()
+                {
+                    let parent_field = parent_field.substitute(&parent_substitutions);
+                    if !self.type_expr_is_subtype(child_field, &parent_field, &child_params) {
+                        return Err(DslError::at(
+                            format!(
+                                "Field {} of constructor `{}` has type `{}`, which is not compatible with parent field type `{}`",
+                                field_index + 1,
+                                constructor.name,
+                                child_field,
+                                parent_field
+                            ),
+                            child_field.span(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn type_expr_reaches_type(
+        &self,
+        expr: &TypeExpr,
+        target: &str,
+        params: &HashSet<String>,
+        visited: &mut HashSet<String>,
+    ) -> bool {
+        let mut names = Vec::new();
+        expr.collect_decl_names(params, &mut names);
+
+        for name in names {
+            if name == target {
+                return true;
+            }
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            let Some(type_decl) = self.type_decl(&name) else {
+                continue;
+            };
+            let nested_params: HashSet<_> = type_decl.params.iter().cloned().collect();
+            for constructor in &type_decl.constructors {
+                for field in &constructor.fields {
+                    if self.type_expr_reaches_type(field, target, &nested_params, visited) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    fn type_expr_is_subtype(
+        &self,
+        left: &TypeExpr,
+        right: &TypeExpr,
+        params: &HashSet<String>,
+    ) -> bool {
+        if left.same_type(right) {
+            return true;
+        }
+
+        let TypeExpr::Named(left_name, left_args, _) = left;
+        let TypeExpr::Named(right_name, _, _) = right;
+        if params.contains(left_name) || params.contains(right_name) {
+            return false;
+        }
+        if left_name == right_name {
+            return false;
+        }
+
+        let Some(left_decl) = self.type_decl(left_name) else {
+            return false;
+        };
+        if left_decl.params.len() != left_args.len() {
+            return false;
+        }
+
+        let Some(parent) = &left_decl.parent else {
+            return false;
+        };
+        let substitutions: HashMap<_, _> = left_decl
+            .params
+            .iter()
+            .cloned()
+            .zip(left_args.iter().cloned())
+            .collect();
+        let instantiated_parent = parent.substitute(&substitutions);
+        self.type_expr_is_subtype(&instantiated_parent, right, params)
     }
 
     fn resolve_closed_type(&self, expr: &TypeExpr) -> Result<RuntimeType, DslError> {
@@ -723,6 +971,106 @@ impl Model {
         }
     }
 
+    fn parent_runtime_type(&self, name: &str, args: &[RuntimeType]) -> Option<RuntimeType> {
+        let type_decl = self.type_decl(name)?;
+        let parent = type_decl.parent.as_ref()?;
+        let substitutions: HashMap<_, _> = type_decl
+            .params
+            .iter()
+            .cloned()
+            .zip(args.iter().cloned())
+            .collect();
+        self.resolve_type(parent, &substitutions).ok()
+    }
+
+    fn runtime_adt_is_subtype(
+        &self,
+        left_name: &str,
+        left_args: &[RuntimeType],
+        right_name: &str,
+        right_args: &[RuntimeType],
+    ) -> bool {
+        let target = RuntimeType::Adt {
+            name: right_name.to_owned(),
+            args: right_args.to_vec(),
+        };
+        let mut current = RuntimeType::Adt {
+            name: left_name.to_owned(),
+            args: left_args.to_vec(),
+        };
+        let mut visited = HashSet::new();
+
+        while visited.insert(current.clone()) {
+            if current == target {
+                return true;
+            }
+            let RuntimeType::Adt { name, args } = current else {
+                return false;
+            };
+            let Some(parent) = self.parent_runtime_type(&name, &args) else {
+                return false;
+            };
+            current = parent;
+        }
+
+        false
+    }
+
+    fn runtime_is_subtype(&self, left: &RuntimeType, right: &RuntimeType) -> bool {
+        if left == right {
+            return true;
+        }
+
+        match (left, right) {
+            (
+                RuntimeType::Adt {
+                    name: left_name,
+                    args: left_args,
+                },
+                RuntimeType::Adt {
+                    name: right_name,
+                    args: right_args,
+                },
+            ) => self.runtime_adt_is_subtype(left_name, left_args, right_name, right_args),
+            (
+                RuntimeType::Variant {
+                    adt: left_adt,
+                    adt_args: left_args,
+                    ..
+                },
+                RuntimeType::Adt {
+                    name: right_name,
+                    args: right_args,
+                },
+            ) => self.runtime_adt_is_subtype(left_adt, left_args, right_name, right_args),
+            (
+                RuntimeType::Variant {
+                    adt: left_adt,
+                    adt_args: left_args,
+                    constructor: left_constructor,
+                    fields: left_fields,
+                },
+                RuntimeType::Variant {
+                    adt: right_adt,
+                    adt_args: right_args,
+                    constructor: right_constructor,
+                    fields: right_fields,
+                },
+            ) => {
+                left_constructor == right_constructor
+                    && left_fields.len() == right_fields.len()
+                    && self.runtime_adt_is_subtype(left_adt, left_args, right_adt, right_args)
+                    && left_fields
+                        .iter()
+                        .zip(right_fields)
+                        .all(|(left_field, right_field)| {
+                            self.runtime_is_subtype(left_field, right_field)
+                        })
+            }
+            _ => false,
+        }
+    }
+
     fn lower_pattern(
         &self,
         context: &mut SpaceContext<RuntimeType, RuntimeExtractor>,
@@ -807,6 +1155,7 @@ impl Model {
             .map(|type_decl| TypeResponse {
                 name: type_decl.name.clone(),
                 params: type_decl.params.clone(),
+                parent: type_decl.parent.as_ref().map(ToString::to_string),
                 constructors: type_decl
                     .constructors
                     .iter()
@@ -841,9 +1190,47 @@ impl TypeExpr {
         *span
     }
 
-    fn references_type(&self, target: &str) -> bool {
+    fn root_name(&self) -> &str {
+        let Self::Named(name, _, _) = self;
+        name
+    }
+
+    fn same_type(&self, other: &Self) -> bool {
+        let Self::Named(left_name, left_args, _) = self;
+        let Self::Named(right_name, right_args, _) = other;
+        left_name == right_name
+            && left_args.len() == right_args.len()
+            && left_args
+                .iter()
+                .zip(right_args)
+                .all(|(left, right)| left.same_type(right))
+    }
+
+    fn substitute(&self, substitutions: &HashMap<String, TypeExpr>) -> Self {
+        let Self::Named(name, args, span) = self;
+        if args.is_empty()
+            && let Some(substitution) = substitutions.get(name)
+        {
+            return substitution.clone();
+        }
+
+        Self::Named(
+            name.clone(),
+            args.iter()
+                .map(|arg| arg.substitute(substitutions))
+                .collect(),
+            *span,
+        )
+    }
+
+    fn collect_decl_names(&self, params: &HashSet<String>, names: &mut Vec<String>) {
         let Self::Named(name, args, _) = self;
-        name == target || args.iter().any(|arg| arg.references_type(target))
+        if !params.contains(name) {
+            names.push(name.clone());
+        }
+        for arg in args {
+            arg.collect_decl_names(params, names);
+        }
     }
 }
 
@@ -937,16 +1324,7 @@ impl SpaceOperations for Model {
     }
 
     fn is_subtype(&self, left: &Self::Type, right: &Self::Type) -> bool {
-        if left == right {
-            return true;
-        }
-        matches!(
-            (left, right),
-            (
-                RuntimeType::Variant { adt: left_adt, adt_args: left_args, .. },
-                RuntimeType::Adt { name: right_adt, args: right_args }
-            ) if left_adt == right_adt && left_args == right_args
-        )
+        self.runtime_is_subtype(left, right)
     }
 
     fn extractors_are_equivalent(&self, left: &Self::Extractor, right: &Self::Extractor) -> bool {
@@ -980,8 +1358,10 @@ impl SpaceOperations for Model {
         left: &Self::Type,
         right: &Self::Type,
     ) -> AtomicIntersection<Self::Type> {
-        if left == right {
+        if self.runtime_is_subtype(left, right) {
             AtomicIntersection::Type(left.clone())
+        } else if self.runtime_is_subtype(right, left) {
+            AtomicIntersection::Type(right.clone())
         } else {
             AtomicIntersection::Empty
         }
@@ -1030,6 +1410,7 @@ enum WarningResponse {
 struct TypeResponse {
     name: String,
     params: Vec<String>,
+    parent: Option<String>,
     constructors: Vec<String>,
 }
 
@@ -1183,6 +1564,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_subtype_declaration() {
+        let source = "type Bool =\n  | true\n  | false\n\ntype Truthy <: Bool =\n  | true\n\nmatch Truthy:\n  true\n";
+        let program = parse(source).unwrap();
+        assert_eq!(program.types[1].name, "Truthy");
+        assert_eq!(
+            program.types[1].parent.as_ref().map(ToString::to_string),
+            Some("Bool".to_owned())
+        );
+    }
+
+    #[test]
+    fn parses_generic_subtype_declaration() {
+        let source = "type Option<T> =\n  | Some(T)\n  | None\n\ntype SomeOnly<T> <: Option<T> =\n  | Some(T)\n\nmatch SomeOnly<Option<T>>:\n";
+        let program = parse(source).unwrap();
+        assert_eq!(program.types[1].params, vec!["T"]);
+        assert_eq!(
+            program.types[1].parent.as_ref().map(ToString::to_string),
+            Some("Option<T>".to_owned())
+        );
+    }
+
+    #[test]
     fn parses_match_block() {
         let program = parse(BOOL).unwrap();
         assert_eq!(program.match_input.arms.len(), 2);
@@ -1195,6 +1598,16 @@ mod tests {
         assert_eq!(
             program.match_input.scrutinee.to_string(),
             "Result<Bool, Option<Bool>>"
+        );
+    }
+
+    #[test]
+    fn parses_parent_type_expression() {
+        let source = "type Bool =\n  | true\n  | false\n\ntype Option<T> =\n  | Some(T)\n  | None\n\ntype SomeBool <: Option<Bool> =\n  | Some(Bool)\n\nmatch SomeBool:\n";
+        let program = parse(source).unwrap();
+        assert_eq!(
+            program.types[2].parent.as_ref().map(ToString::to_string),
+            Some("Option<Bool>".to_owned())
         );
     }
 
@@ -1230,6 +1643,49 @@ mod tests {
     #[test]
     fn analyzes_top_level_or_pattern() {
         let source = "type Bool =\n  | true\n  | false\n\nmatch Bool:\n  true | false\n";
+        assert_eq!(json(source)["isExhaustive"], true);
+    }
+
+    #[test]
+    fn analyzes_exhaustive_subtype_refinement() {
+        let source = "type Bool =\n  | true\n  | false\n\ntype Truthy <: Bool =\n  | true\n\nmatch Truthy:\n  true\n";
+        let result = json(source);
+        assert_eq!(result["isExhaustive"], true);
+        assert_eq!(result["types"][1]["parent"], "Bool");
+    }
+
+    #[test]
+    fn analyzes_non_exhaustive_subtype_refinement() {
+        let source = "type Bool =\n  | true\n  | false\n\ntype Truthy <: Bool =\n  | true\n\nmatch Truthy:\n";
+        let result = json(source);
+        assert_eq!(result["isExhaustive"], false);
+    }
+
+    #[test]
+    fn rejects_parent_constructor_against_subtype_scrutinee() {
+        assert!(
+            error("type Bool =\n  | true\n  | false\n\ntype Truthy <: Bool =\n  | true\n\nmatch Truthy:\n  false\n")
+                .contains("Constructor `false` cannot match `Truthy`")
+        );
+    }
+
+    #[test]
+    fn parent_scrutinee_still_requires_parent_constructors() {
+        let source = "type Bool =\n  | true\n  | false\n\ntype Truthy <: Bool =\n  | true\n\nmatch Bool:\n  true\n";
+        let result = json(source);
+        assert_eq!(result["isExhaustive"], false);
+        assert_eq!(result["uncovered"], serde_json::json!(["false"]));
+    }
+
+    #[test]
+    fn analyzes_generic_subtype_refinement() {
+        let source = "type Bool =\n  | true\n  | false\n\ntype Option<T> =\n  | Some(T)\n  | None\n\ntype SomeOnly<T> <: Option<T> =\n  | Some(T)\n\nmatch SomeOnly<Bool>:\n  Some(true)\n  Some(false)\n";
+        assert_eq!(json(source)["isExhaustive"], true);
+    }
+
+    #[test]
+    fn analyzes_or_pattern_with_subtype_scrutinee() {
+        let source = "type Bool =\n  | true\n  | false\n\ntype Option<T> =\n  | Some(T)\n  | None\n\ntype SomeOnly<T> <: Option<T> =\n  | Some(T)\n\nmatch SomeOnly<Bool>:\n  Some(true | false)\n";
         assert_eq!(json(source)["isExhaustive"], true);
     }
 
@@ -1278,6 +1734,54 @@ mod tests {
         assert!(
             error("type Bool =\n  | true\n  | false\n\ntype Option<T> =\n  | Some(T)\n  | None\n\nmatch Bool:\n  Some(true)\n")
                 .contains("cannot match `Bool`")
+        );
+    }
+
+    #[test]
+    fn reports_unknown_parent_type_error() {
+        assert!(
+            error("type Dog <: Animal =\n  | Bark\n\nmatch Dog:\n  Bark\n")
+                .contains("Unknown parent type `Animal`")
+        );
+    }
+
+    #[test]
+    fn reports_parent_generic_arity_mismatch() {
+        assert!(
+            error("type Bool =\n  | true\n  | false\n\ntype Option<T> =\n  | Some(T)\n  | None\n\ntype SomeOnly <: Option =\n  | Some(Bool)\n\nmatch SomeOnly:\n  Some(true)\n")
+                .contains("Parent type `Option` expects 1 type argument(s), got 0")
+        );
+    }
+
+    #[test]
+    fn reports_inheritance_cycle_error() {
+        assert!(
+            error("type A <: B =\n  | a\n\ntype B <: A =\n  | a\n\nmatch A:\n  a\n")
+                .contains("Inheritance cycle involving")
+        );
+    }
+
+    #[test]
+    fn reports_child_constructor_not_in_parent() {
+        assert!(
+            error("type Bool =\n  | true\n  | false\n\ntype Truthy <: Bool =\n  | yes\n\nmatch Truthy:\n  yes\n")
+                .contains("Constructor `yes` is not declared by parent type `Bool`")
+        );
+    }
+
+    #[test]
+    fn reports_child_constructor_arity_mismatch() {
+        assert!(
+            error("type Bool =\n  | true\n  | false\n\ntype Option<T> =\n  | Some(T)\n  | None\n\ntype Bad <: Option<Bool> =\n  | Some(Bool, Bool)\n\nmatch Bad:\n  Some(true, false)\n")
+                .contains("Constructor `Some` has 2 field(s), but parent type `Option` declares 1")
+        );
+    }
+
+    #[test]
+    fn reports_incompatible_child_constructor_field_type() {
+        assert!(
+            error("type Bool =\n  | true\n  | false\n\ntype Box<T> =\n  | Box(T)\n\ntype Bad <: Box<Bool> =\n  | Box(Box<Bool>)\n\nmatch Bad:\n  Box(_)\n")
+                .contains("not compatible with parent field type `Bool`")
         );
     }
 }

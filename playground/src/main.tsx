@@ -40,6 +40,7 @@ type Warning =
 type TypeDecl = {
   name: string;
   params: string[];
+  parent: string | null;
   constructors: string[];
 };
 
@@ -83,6 +84,20 @@ match Bool:
   | false
 
 match Bool:
+  true
+`,
+  },
+  {
+    name: "Subtype refinement",
+    description: "Narrows a parent ADT to a constructor subset.",
+    source: `type Bool =
+  | true
+  | false
+
+type Truthy <: Bool =
+  | true
+
+match Truthy:
   true
 `,
   },
@@ -157,7 +172,9 @@ match Result<Bool, Option<Bool>>:
 ];
 
 function App() {
-  const [source, setSource] = useState(examples[2].source);
+  const [source, setSource] = useState(
+    examples.find((example) => example.name === "Option Bool")?.source ?? examples[0].source,
+  );
   const [ready, setReady] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [selectedLine, setSelectedLine] = useState<number | null>(null);
@@ -586,6 +603,7 @@ function AnalysisPanel({
               <code>
                 {typeDecl.name}
                 {typeDecl.params.length > 0 ? `<${typeDecl.params.join(", ")}>` : ""}
+                {typeDecl.parent ? ` <: ${typeDecl.parent}` : ""}
               </code>
               <span>{typeDecl.constructors.join(" | ")}</span>
             </div>
@@ -767,6 +785,9 @@ function Guidance({
   | Constructor
   | Constructor(Type, Type)
 
+type Child <: Parent =
+  | ParentConstructor
+
 match Type:
   pattern
   pattern`}</pre>
@@ -809,7 +830,7 @@ Names like true, false, and None are nullary constructors.`}</pre>
 }
 
 function HighlightedLine({ text }: { text: string }) {
-  const parts = text.split(/(\b(?:type|match)\b|[_|=():,<>]|\b[A-Z][A-Za-z0-9_]*\b|\b[a-z][A-Za-z0-9_]*\b)/g);
+  const parts = text.split(/(<:|\b(?:type|match)\b|[_|=():,<>]|\b[A-Z][A-Za-z0-9_]*\b|\b[a-z][A-Za-z0-9_]*\b)/g);
   return (
     <>
       {parts.map((part, index) => {
@@ -823,7 +844,7 @@ function HighlightedLine({ text }: { text: string }) {
               ? "tok-type"
               : /^[a-z]/.test(part)
                 ? "tok-constructor"
-                : /[_|=():,<>]/.test(part)
+                : part === "<:" || /[_|=():,<>]/.test(part)
                   ? "tok-punct"
                   : undefined;
         return (
