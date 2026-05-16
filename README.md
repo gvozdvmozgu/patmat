@@ -1,7 +1,5 @@
 # patmat
 
-[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge/github/gvozdvmozgu/patmat)](https://codspeed.io/gvozdvmozgu/patmat?utm_source=badge)
-
 `patmat` is a reusable Rust implementation of the space-based exhaustivity
 algorithm described in Fengyun Liu's paper,
 [_A Generic Algorithm for Checking Exhaustivity of Pattern Matching_](https://dl.acm.org/doi/10.1145/2998392.2998401).
