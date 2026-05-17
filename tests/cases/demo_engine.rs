@@ -278,6 +278,26 @@ fn unreachable_arm_can_report_joint_coverage() {
 }
 
 #[test]
+fn exhaustivity_handles_high_arity_flat_products_iteratively() {
+    let mut context = demo_context();
+    let bool_space = type_space(&mut context, DemoType::Bool);
+    let arity = 20_000;
+    let scrutinee_space = product_space(
+        &mut context,
+        DemoType::Any,
+        DemoExtractor::Pair,
+        vec![bool_space; arity],
+    );
+    let match_input = MatchInput::new(scrutinee_space, Vec::new());
+    let mut engine = demo_engine(&mut context);
+
+    let analysis = engine.analyze_match(&match_input);
+
+    assert_eq!(analysis.uncovered_spaces, vec![scrutinee_space]);
+    assert!(analysis.reachability_warnings.is_empty());
+}
+
+#[test]
 fn reused_engine_returns_stable_results_before_and_after_clearing_caches() {
     let mut context = demo_context();
     let option_of_boolean = DemoType::Option(Box::new(DemoType::Bool));

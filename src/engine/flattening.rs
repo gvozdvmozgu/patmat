@@ -71,50 +71,55 @@ where
             return;
         }
 
-        let mut current_parameters = Vec::with_capacity(parameter_options.len());
         self.push_flattened_product_combinations(
-            &value_type_key,
-            &extractor,
+            value_type_key,
+            extractor,
             &parameter_options,
-            &mut current_parameters,
             flattened,
         );
     }
 
     fn push_flattened_product_combinations(
         &mut self,
-        value_type_key: &TypeKey<TI>,
-        extractor: &ExtractorKey<EI>,
+        value_type_key: TypeKey<TI>,
+        extractor: ExtractorKey<EI>,
         parameter_options: &[Vec<EngineSpace<O>>],
-        current_parameters: &mut Vec<EngineSpace<O>>,
         flattened: &mut Vec<EngineSpace<O>>,
     ) {
-        let parameter_index = current_parameters.len();
-        if parameter_index == parameter_options.len() {
+        let mut option_indices = vec![0; parameter_options.len()];
+
+        loop {
+            let parameters = parameter_options
+                .iter()
+                .zip(&option_indices)
+                .map(|(options, &option_index)| {
+                    *options
+                        .get(option_index)
+                        .expect("flattened parameter options must contain at least one space")
+                })
+                .collect();
+
             flattened.push(self.make_product_space_from_keys(
                 value_type_key.clone(),
                 extractor.clone(),
-                current_parameters.clone(),
+                parameters,
             ));
-            return;
-        }
 
-        let options = &parameter_options[parameter_index];
-        assert!(
-            !options.is_empty(),
-            "flattened parameter options must contain at least one space",
-        );
+            let Some(advanced_index) = option_indices.iter_mut().enumerate().rev().find_map(
+                |(parameter_index, option_index)| {
+                    *option_index += 1;
+                    if *option_index < parameter_options[parameter_index].len() {
+                        Some(parameter_index)
+                    } else {
+                        *option_index = 0;
+                        None
+                    }
+                },
+            ) else {
+                break;
+            };
 
-        for &option in options {
-            current_parameters.push(option);
-            self.push_flattened_product_combinations(
-                value_type_key,
-                extractor,
-                parameter_options,
-                current_parameters,
-                flattened,
-            );
-            current_parameters.pop();
+            option_indices[(advanced_index + 1)..].fill(0);
         }
     }
 }
